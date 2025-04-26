@@ -1,0 +1,17 @@
+{
+  "domain": "finance_assistant",
+  "name": "Finance Assistant",
+  "version": "0.3.454",
+  "documentation": "https://github.com/chbarnhouse/home-assistant-integrations/tree/main/finance_assistant",
+  "issue_tracker": "https://github.com/chbarnhouse/home-assistant-integrations/issues",
+  "requirements": ["ynab-api==0.3.0"],
+  "codeowners": ["@chbarnhouse"],
+  "config_flow": true,
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "loggers": [
+    "ynab_api",
+    "custom_components.finance_assistant",
+    "backend.ynab_client"
+  ]
+}
