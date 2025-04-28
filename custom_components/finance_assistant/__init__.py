@@ -35,6 +35,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     supervisor_token = os.getenv("SUPERVISOR_TOKEN")
 
+    # Initialize use_supervisor_api to False
+    use_supervisor_api = False
+
     # --- Perform Initial Supervisor Ping Check ---
     if supervisor_token:
         _LOGGER.debug("Attempting initial Supervisor addon direct ping...")
