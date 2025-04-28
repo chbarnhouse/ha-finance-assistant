@@ -61,7 +61,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.debug("SUPERVISOR_TOKEN not found. Assuming direct connection needed.")
 
     if not use_supervisor_api:
-         _LOGGER.warning("Supervisor addon ping failed or token missing. Direct connection will be primary method.")
+         # Log as INFO since fallback is working as expected
+         _LOGGER.info("Supervisor addon ping failed or token missing. Direct connection will be primary method.")
     # --- End Revised Environment Check ---
 
     # Create the coordinator instance
