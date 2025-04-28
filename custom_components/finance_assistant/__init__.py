@@ -113,13 +113,13 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         self.addon_slug = addon_slug
         self.supervisor_token = os.environ.get('SUPERVISOR_TOKEN')
         # Define the port used for direct connection (from addon config)
-        direct_port = 8000
+        self.direct_port = 8000
 
         # Determine Base URLs based on environment and settings
         self.supervisor_url = f"http://supervisor/addons/{addon_slug}/api"
         # !!! WORKAROUND !!! Use 'homeassistant:8000' instead of slug due to DNS issues
-        # self.direct_url = f"http://{addon_slug}:{direct_port}/api"
-        self.direct_url = f"http://homeassistant:{direct_port}/api"
+        # self.direct_url = f"http://{addon_slug}:{self.direct_port}/api"
+        self.direct_url = f"http://homeassistant:{self.direct_port}/api"
         _LOGGER.info(f"Supervisor URL: {self.supervisor_url}")
         _LOGGER.info(f"Direct URL (WORKAROUND): {self.direct_url}")
 
