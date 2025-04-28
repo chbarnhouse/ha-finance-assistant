@@ -125,7 +125,9 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         # Define BOTH base URLs regardless of initial check
         self.supervisor_api_base_url = f"http://supervisor/addons/{self.addon_slug}/api"
         # Always use host.docker.internal for direct fallback in this setup
-        self.direct_api_base_url = "http://host.docker.internal:8000/api"
+        # self.direct_api_base_url = "http://host.docker.internal:8000/api"
+        # Use the addon slug as the hostname for direct connections in HA OS/Supervised
+        self.direct_api_base_url = f"http://{self.addon_slug}:8000/api"
 
         _LOGGER.debug(f"Coordinator initialized. Supervisor URL base: {self.supervisor_api_base_url}, Direct URL base: {self.direct_api_base_url}")
 
