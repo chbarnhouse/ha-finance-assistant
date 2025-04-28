@@ -122,106 +122,142 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         self.websession = async_get_clientsession(hass)
         self.supervisor_token = os.getenv("SUPERVISOR_TOKEN")
 
-        # Define BOTH base URLs regardless of initial check
+        # Define BOTH base URLs initially
         self.supervisor_api_base_url = f"http://supervisor/addons/{self.addon_slug}/api"
-        # Always use host.docker.internal for direct fallback in this setup
-        # self.direct_api_base_url = "http://host.docker.internal:8000/api"
-        # Use the addon slug as the hostname for direct connections in HA OS/Supervised
+        # Default direct URL assumes production fallback using slug
         self.direct_api_base_url = f"http://{self.addon_slug}:8000/api"
+
+        # If no supervisor token, assume dev environment and set direct URL to host.docker.internal
+        if not self.supervisor_token:
+             _LOGGER.info("No SUPERVISOR_TOKEN found. Assuming dev environment, setting direct URL to host.docker.internal.")
+             self.direct_api_base_url = "http://host.docker.internal:8000/api"
+        # else: # Optional: Log if we are in Supervisor mode
+        #     _LOGGER.info("SUPERVISOR_TOKEN found. Assuming Supervisor environment.")
 
         _LOGGER.debug(f"Coordinator initialized. Supervisor URL base: {self.supervisor_api_base_url}, Direct URL base: {self.direct_api_base_url}")
 
     async def _request(self, method, endpoint, params=None, data=None, json_data=None):
-        """Make an API request, trying Supervisor first, then direct fallback."""
+        """Make an API request, trying the appropriate method based on environment."""
         headers = {}
         last_error = None
         endpoint_clean = endpoint.lstrip('/')
 
-        # 1. Try Supervisor API
+        # Determine primary and secondary URLs/methods based on environment
+        primary_url = None
+        secondary_url = None
+        primary_method = "Unknown"
+        secondary_method = "Unknown"
+
         if self.supervisor_token:
+            # Production/Supervisor: Try Supervisor first, fallback to Direct (slug)
+            primary_url = f"{self.supervisor_api_base_url}/{endpoint_clean}"
+            primary_method = "Supervisor"
+            secondary_url = f"{self.direct_api_base_url}/{endpoint_clean}" # Uses slug hostname here
+            secondary_method = "Direct (via slug)"
             headers = {"Authorization": f"Bearer {self.supervisor_token}"}
-            supervisor_url = f"{self.supervisor_api_base_url}/{endpoint_clean}"
-            _LOGGER.debug(f"Attempting Supervisor API request to: {supervisor_url}")
+            _LOGGER.debug(f"Supervisor env detected. Primary: {primary_method}, Secondary: {secondary_method}")
+        else:
+            # Dev environment: Prioritize Direct (host.docker.internal)
+            primary_url = f"{self.direct_api_base_url}/{endpoint_clean}" # Uses host.docker.internal here
+            primary_method = "Direct (via host.docker.internal)"
+            # No Supervisor fallback possible without token
+            secondary_url = None
+            secondary_method = "None"
+            _LOGGER.debug(f"Dev env detected. Primary: {primary_method}, No Secondary.")
+
+        # --- 1. Try Primary Method ---
+        if primary_url:
+            _LOGGER.debug(f"Attempting {primary_method} API request to: {primary_url}")
+            primary_headers = headers.copy() # Use appropriate headers for primary
             try:
                 async with self.websession.request(
-                    method, supervisor_url, headers=headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=10)
+                    method, primary_url, headers=primary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     if 200 <= response.status < 300:
-                        _LOGGER.debug(f"Supervisor API success ({response.status}) for {endpoint}")
+                        _LOGGER.debug(f"{primary_method} API success ({response.status}) for {endpoint}")
                         try:
-                            if response.status == 204: return {}
+                            if response.status == 204: return {} # Handle No Content
                             return await response.json()
                         except (aiohttp.ContentTypeError, json.JSONDecodeError) as json_err:
                             content_text = await response.text()
-                            _LOGGER.error(f"Supervisor API non-JSON content (status {response.status}): {json_err}. Content: {content_text[:100]}")
-                            last_error = UpdateFailed(f"Supervisor API returned non-JSON: {content_text[:100]}")
+                            _LOGGER.error(f"{primary_method} API returned non-JSON (status {response.status}): {json_err}. Content: {content_text[:100]}...")
+                            last_error = UpdateFailed(f"{primary_method} API returned non-JSON: {content_text[:100]}...")
+                        except Exception as err:
+                            _LOGGER.error(f"Unexpected {primary_method} API error for {endpoint}: {err}", exc_info=True)
+                            last_error = UpdateFailed(f"Unexpected {primary_method} API error: {err}")
                     # --- Handle specific non-success codes before fallback ---
                     elif response.status == 404:
-                         _LOGGER.warning(f"Supervisor API 404 for {endpoint}. Check addon slug/endpoint. Falling back.")
-                         last_error = UpdateFailed(f"Supervisor API 404 for {endpoint}")
+                         _LOGGER.warning(f"{primary_method} API 404 for {endpoint}. Check slug/endpoint/token. Falling back if possible.")
+                         last_error = UpdateFailed(f"{primary_method} API 404 for {endpoint}")
                     elif response.status == 401:
-                         _LOGGER.warning(f"Supervisor API 401 for {endpoint}. Check token. Falling back.")
-                         last_error = UpdateFailed(f"Supervisor API 401 for {endpoint}")
+                         _LOGGER.warning(f"{primary_method} API 401 for {endpoint}. Check token. Falling back if possible.")
+                         last_error = UpdateFailed(f"{primary_method} API 401 for {endpoint}")
                     else:
                         response_text = await response.text()
-                        _LOGGER.warning(f"Supervisor API failed ({response.status}) for {endpoint}. Response: {response_text[:200]}. Falling back.")
-                        last_error = UpdateFailed(f"Supervisor API failed ({response.status}): {response_text[:100]}")
+                        _LOGGER.warning(f"{primary_method} API failed ({response.status}) for {endpoint}. Response: {response_text[:200]}... Falling back if possible.")
+                        last_error = UpdateFailed(f"{primary_method} API failed ({response.status}): {response_text[:100]}...")
 
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
-                _LOGGER.warning(f"Supervisor API connection error for {endpoint}: {err}. Falling back.")
-                last_error = UpdateFailed(f"Supervisor API connection error: {err}")
+                _LOGGER.warning(f"{primary_method} API connection error for {endpoint}: {err}. Falling back if possible.")
+                last_error = UpdateFailed(f"{primary_method} API connection error: {err}")
             except Exception as err:
-                 _LOGGER.error(f"Unexpected Supervisor API error for {endpoint}: {err}", exc_info=True)
-                 last_error = UpdateFailed(f"Unexpected Supervisor API error: {err}")
+                 _LOGGER.error(f"Unexpected {primary_method} API error for {endpoint}: {err}", exc_info=True)
+                 last_error = UpdateFailed(f"Unexpected {primary_method} API error: {err}")
         else:
-            _LOGGER.debug("SUPERVISOR_TOKEN not found, skipping Supervisor API attempt.")
-            # Set a dummy error to trigger fallback logic
-            last_error = UpdateFailed("Supervisor token not found")
+             # Should not happen if logic above is correct, but good to handle
+             _LOGGER.error("Primary URL was not determined. Cannot make request.")
+             raise UpdateFailed("Internal configuration error: Primary URL not set.")
 
-        # 2. Try Direct API (if Supervisor failed or wasn't attempted)
-        if last_error:
-            direct_url = f"{self.direct_api_base_url}/{endpoint_clean}"
-            _LOGGER.info(f"Attempting direct API fallback to: {direct_url}")
-            # Clear Supervisor auth header if it was set
-            headers = {}
+        # --- 2. Try Secondary Method (if Primary failed and Secondary exists) ---
+        if last_error and secondary_url:
+            _LOGGER.info(f"Primary method failed ({last_error}). Attempting {secondary_method} API fallback to: {secondary_url}")
+            secondary_headers = {} # Direct fallback doesn't use Supervisor token
             try:
                 async with self.websession.request(
-                    method, direct_url, headers=headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=15) # Slightly longer timeout for direct?
+                    method, secondary_url, headers=secondary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=15)
                 ) as response:
                     if 200 <= response.status < 300:
-                        _LOGGER.debug(f"Direct API success ({response.status}) for {endpoint}")
+                        _LOGGER.info(f"{secondary_method} API success ({response.status}) for {endpoint}") # Log fallback success as info
+                        # Fallback succeeded, clear the error and return data
+                        last_error = None
                         try:
-                             if response.status == 204: return {}
+                             if response.status == 204: return {} # Handle No Content
                              return await response.json()
                         except (aiohttp.ContentTypeError, json.JSONDecodeError) as json_err:
                             content_text = await response.text()
-                            _LOGGER.error(f"Direct API non-JSON content (status {response.status}): {json_err}. Content: {content_text[:100]}")
-                            raise UpdateFailed(f"Direct API returned non-JSON: {content_text[:100]}") # Raise failure
+                            _LOGGER.error(f"{secondary_method} API returned non-JSON (status {response.status}): {json_err}. Content: {content_text[:100]}...")
+                            # Even though fallback connection worked, data is bad, raise UpdateFailed
+                            raise UpdateFailed(f"{secondary_method} API returned non-JSON: {content_text[:100]}...")
                     else:
+                        # Fallback attempt also failed
                         response_text = await response.text()
-                        _LOGGER.error(f"Direct API request failed ({response.status}) for {endpoint}. Response: {response_text[:200]}")
-                        raise UpdateFailed(f"Direct API failed ({response.status}): {response_text[:100]}") # Raise failure
+                        _LOGGER.error(f"{secondary_method} API request failed ({response.status}) for {endpoint}. Response: {response_text[:200]}...")
+                        # Raise an error indicating the fallback failure, potentially including the original primary error?
+                        # For now, just raise the secondary error.
+                        raise UpdateFailed(f"{secondary_method} API failed ({response.status}): {response_text[:100]}...")
 
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
-                _LOGGER.error(f"Direct API connection error for {endpoint}: {err}")
-                raise UpdateFailed(f"Direct API connection error: {err}") # Raise failure
+                _LOGGER.error(f"{secondary_method} API connection error for {endpoint}: {err}")
+                # Raise error indicating secondary connection failure
+                raise UpdateFailed(f"{secondary_method} API connection error: {err}")
             except UpdateFailed as err:
-                 _LOGGER.error(f"Direct API UpdateFailed: {err}")
-                 raise err # Re-raise UpdateFailed from non-200/non-JSON direct response
+                 _LOGGER.error(f"Secondary API UpdateFailed: {err}")
+                 raise err # Re-raise UpdateFailed from non-200/non-JSON secondary response
             except Exception as err:
-                 _LOGGER.exception(f"Unexpected direct API error for {endpoint}: {err}")
-                 raise UpdateFailed(f"Unexpected direct API error: {err}") # Raise failure
+                 _LOGGER.exception(f"Unexpected {secondary_method} API error for {endpoint}: {err}")
+                 # Raise error indicating unexpected secondary failure
+                 raise UpdateFailed(f"Unexpected {secondary_method} API error: {err}")
 
-        # If last_error is still set here, it means Supervisor failed AND Direct wasn't attempted or also failed.
-        # The logic above should raise UpdateFailed in all direct failure cases.
-        # This part should ideally not be reached if Supervisor succeeded initially or Direct failed properly.
+        # --- 3. Final Outcome ---
         if last_error:
-             _LOGGER.error(f"API request failed after attempting Supervisor and/or Direct. Last error: {last_error}")
-             raise last_error # Raise the originally captured error if Direct path didn't execute or failed silently
+             # If we get here, it means Primary failed AND (Secondary doesn't exist OR Secondary also failed)
+             _LOGGER.error(f"API request failed for {endpoint} after all attempts. Last error: {last_error}")
+             raise last_error # Raise the final error (either from Primary or Secondary)
         else:
-            # This case means Supervisor succeeded, which should have returned earlier.
-            _LOGGER.error("Reached unexpected end of _request function: Supervisor must have succeeded but did not return.")
-            raise UpdateFailed("Unexpected state in API request logic after Supervisor success")
+             # This should only happen if Primary succeeded on the first try.
+             # The function should have returned within the first 'try' block.
+             _LOGGER.error(f"Reached unexpected end of _request function for {endpoint} without error but without returning data.")
+             raise UpdateFailed("Unexpected state in API request logic")
 
     async def verify_connection(self):
         """Verify connection to the addon API by trying the ping endpoint."""
