@@ -69,6 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = FinanceAssistantDataUpdateCoordinator(
         hass,
         addon_slug,
+        entry # Pass the config entry
         # use_supervisor_api # Flag not strictly needed by coordinator now
     )
 
@@ -107,11 +108,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Finance Assistant data from the addon."""
 
-    def __init__(self, hass: HomeAssistant, addon_slug: str):
+    def __init__(self, hass: HomeAssistant, addon_slug: str, entry: ConfigEntry):
         """Initialize the coordinator."""
         _LOGGER.info(f"Initializing Finance Assistant Coordinator for slug: {addon_slug}")
         self.addon_slug = addon_slug
         self.supervisor_token = os.environ.get('SUPERVISOR_TOKEN')
+        # Define headers for Supervisor API calls
+        self.supervisor_headers = {}
+        if self.supervisor_token:
+            self.supervisor_headers = {"Authorization": f"Bearer {self.supervisor_token}"}
+
         # Define the port used for direct connection (from addon config)
         self.direct_port = 8000
 
@@ -132,6 +138,16 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         #     _LOGGER.info("SUPERVISOR_TOKEN found. Assuming Supervisor environment.")
 
         _LOGGER.debug(f"Coordinator initialized. Supervisor URL base: {self.supervisor_url}, Direct URL base: {self.direct_url}")
+
+        # Call super().__init__ AFTER defining attributes used by it
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=SCAN_INTERVAL,
+            # config_entry=entry # Pass the config entry here
+        )
+        self.config_entry = entry # Store config_entry if needed elsewhere
 
     async def _request(self, method, endpoint, params=None, data=None, json_data=None):
         """Make an API request, trying the appropriate method based on environment."""
