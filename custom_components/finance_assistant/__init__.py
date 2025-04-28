@@ -108,18 +108,14 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Finance Assistant data from the addon."""
 
     def __init__(self, hass: HomeAssistant, addon_slug: str):
-        """Initialize."""
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=DOMAIN,
-            update_interval=SCAN_INTERVAL,
-        )
+        """Initialize the coordinator."""
+        _LOGGER.info(f"Initializing Finance Assistant Coordinator for slug: {addon_slug}")
         self.addon_slug = addon_slug
-        self.websession = async_get_clientsession(hass)
-        self.supervisor_token = os.getenv("SUPERVISOR_TOKEN")
+        self.supervisor_token = os.environ.get('SUPERVISOR_TOKEN')
+        # Define the port used for direct connection (from addon config)
+        direct_port = 8000
 
-        # Define BOTH base URLs initially
+        # Determine Base URLs based on environment and settings
         self.supervisor_url = f"http://supervisor/addons/{addon_slug}/api"
         # !!! WORKAROUND !!! Use 'homeassistant:8000' instead of slug due to DNS issues
         # self.direct_url = f"http://{addon_slug}:{direct_port}/api"

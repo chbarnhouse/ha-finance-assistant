@@ -1,7 +1,8 @@
 {
   "domain": "finance_assistant",
   "name": "Finance Assistant",
-  "version": "0.3.536",
+  "version": "0.3.537",
+  "version": "0.3.527",
   "documentation": "https://github.com/chbarnhouse/home-assistant-addons",
   "issue_tracker": "https://github.com/chbarnhouse/home-assistant-addons/issues",
   "requirements": ["ynab-api==2.0.2"],
