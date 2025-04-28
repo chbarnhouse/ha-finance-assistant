@@ -15,6 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util # Import datetime utilities
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers import device_registry as dr # Import device registry
 
 from .const import DOMAIN
 from . import FinanceAssistantDataUpdateCoordinator # Import directly from __init__.py
@@ -74,6 +75,19 @@ async def async_setup_entry(
     """Set up Finance Assistant sensors based on a config entry."""
     _LOGGER.debug("Setting up Finance Assistant sensors")
     coordinator: FinanceAssistantDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+
+    # --- Create the main integration device FIRST --- PREVIOUSLY MISSING
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name="Finance Assistant", # Name for the main device
+        manufacturer="Finance Assistant Addon",
+        # model="Addon Integration", # Optional: Add model if desired
+        # sw_version=coordinator.data.get("addon_version", "Unknown"), # Optional: If addon version is available
+    )
+    _LOGGER.debug(f"Ensured main device exists for entry ID: {entry.entry_id}")
+    # --- End main device creation ---
 
     # Wait for coordinator to do its first update
     await coordinator.async_config_entry_first_refresh()

@@ -51,7 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     use_supervisor_api = True
                     _LOGGER.info("Supervisor addon ping successful. Will prioritize Supervisor API.")
                 else:
-                    _LOGGER.warning(f"Supervisor addon ping failed with status: {resp.status}. Will attempt direct connection.")
+                    _LOGGER.info(f"Supervisor addon ping failed with status: {resp.status}. Will attempt direct connection.")
         except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
             _LOGGER.warning(f"Supervisor addon ping failed with connection error: {err}. Will attempt direct connection.")
         except Exception as err: # Catch unexpected errors during ping
@@ -200,7 +200,8 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
                             last_error = UpdateFailed(f"Unexpected {primary_method} API error: {err}")
                     # --- Handle specific non-success codes before fallback ---
                     elif response.status == 404:
-                         _LOGGER.warning(f"{primary_method} API 404 for {endpoint}. Check slug/endpoint/token. Falling back if possible.")
+                         # Downgrade 404 from warning to info, as fallback is expected sometimes
+                         _LOGGER.info(f"{primary_method} API 404 for {endpoint}. Check slug/endpoint/token. Falling back if possible.")
                          last_error = UpdateFailed(f"{primary_method} API 404 for {endpoint}")
                     elif response.status == 401:
                          _LOGGER.warning(f"{primary_method} API 401 for {endpoint}. Check token. Falling back if possible.")
@@ -294,7 +295,7 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
                         return True
                     else:
                         response_text = await response.text()
-                        _LOGGER.warning(f"Supervisor ping failed ({response.status}): {response_text[:100]}...")
+                        _LOGGER.info(f"Supervisor ping failed ({response.status}): {response_text[:100]}...")
                         last_error = UpdateFailed(f"Supervisor ping failed ({response.status})")
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
                 _LOGGER.warning(f"Supervisor ping connection error: {err}")
