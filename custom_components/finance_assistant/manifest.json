@@ -1,7 +1,7 @@
 {
   "domain": "finance_assistant",
   "name": "Finance Assistant",
-  "version": "0.3.544",
+  "version": "0.3.545",
   "documentation": "https://github.com/chbarnhouse/home-assistant-addons",
   "issue_tracker": "https://github.com/chbarnhouse/home-assistant-addons/issues",
   "requirements": ["ynab-api==2.0.2"],
@@ -9,6 +9,7 @@
   "config_flow": true,
   "integration_type": "hub",
   "logo": "mdi:finance",
+  "icon": "mdi:finance",
   "iot_class": "cloud_poll",
   "loggers": [
     "ynab_api",
