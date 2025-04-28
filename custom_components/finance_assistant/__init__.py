@@ -122,6 +122,7 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         self.direct_url = f"http://homeassistant:{self.direct_port}/api"
         _LOGGER.info(f"Supervisor URL: {self.supervisor_url}")
         _LOGGER.info(f"Direct URL (WORKAROUND): {self.direct_url}")
+        self.websession = async_get_clientsession(hass)
 
         # If no supervisor token, assume dev environment and set direct URL to host.docker.internal
         if not self.supervisor_token:
