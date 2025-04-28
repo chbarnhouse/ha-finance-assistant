@@ -35,25 +35,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     supervisor_token = os.getenv("SUPERVISOR_TOKEN")
 
-    # --- Revised Environment Check: Try pinging addon via Supervisor ---
-    use_supervisor_api = False
+    # --- Perform Initial Supervisor Ping Check ---
     if supervisor_token:
-        _LOGGER.debug("SUPERVISOR_TOKEN found, attempting Supervisor addon ping...")
-        ping_url = f"http://supervisor/addons/{addon_slug}/api/ping"
+        _LOGGER.debug("Attempting initial Supervisor addon direct ping...")
         headers = {"Authorization": f"Bearer {supervisor_token}"}
+        # Use the *root* ping endpoint for this initial check
+        supervisor_ping_url = f"http://supervisor/addons/{addon_slug}/ping"
+        _LOGGER.debug(f"Pinging Supervisor URL: {supervisor_ping_url}")
         try:
-            # Short timeout for the initial check
-            async with session.get(ping_url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.request("GET", supervisor_ping_url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status == 200:
-                    # Ensure response is expected (optional: check content)
-                    # pong_data = await resp.json() # Add if ping returns json
-                    # if pong_data.get("message") == "pong":
                     use_supervisor_api = True
                     _LOGGER.info("Supervisor addon ping successful. Will prioritize Supervisor API.")
-                    # else:
-                    #     _LOGGER.warning(f"Supervisor addon ping returned 200 but unexpected content: {pong_data}")
                 else:
-                    # Log specific failure but don't raise here, fallback will be used
                     _LOGGER.warning(f"Supervisor addon ping failed with status: {resp.status}. Will attempt direct connection.")
         except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
             _LOGGER.warning(f"Supervisor addon ping failed with connection error: {err}. Will attempt direct connection.")
@@ -263,10 +257,9 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         """Verify connection to the addon API by trying the ping endpoint."""
         _LOGGER.info("Verifying connection to Finance Assistant API...")
         try:
-            # Use '/api/ping' or similar simple GET endpoint in the addon
-            # Addon needs a simple endpoint like /api/ping
-            _LOGGER.info(f"Attempting API ping...") # Log less detail here
-            await self._request("GET", "ping") # Use ping endpoint
+            # Use the ROOT '/ping' endpoint for verification now
+            _LOGGER.info(f"Attempting API ping (using root /ping endpoint)...")
+            await self._request("GET", "/ping") # Use root ping endpoint
             _LOGGER.info("Finance Assistant API connection verified successfully.")
             return True
         # Catch UpdateFailed specifically from _request
@@ -281,6 +274,7 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         """Fetch data from the Finance Assistant addon API."""
         _LOGGER.debug("Fetching data from Finance Assistant addon")
         try:
+            # Data fetching still uses the /api prefix via the base URLs in _request
             data = await self._request("GET", "all_data")
             if not isinstance(data, dict):
                 _LOGGER.error(f"API '/all_data' returned non-dictionary data: {type(data)}")
