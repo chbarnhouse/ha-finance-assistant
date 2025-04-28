@@ -84,7 +84,6 @@ async def async_setup_entry(
         name="Finance Assistant", # Name for the main device
         manufacturer="Finance Assistant Addon",
         model="Addon Integration", # Add model
-        icon="mdi:finance", # Add icon
         # sw_version=coordinator.data.get("addon_version", "Unknown"), # Optional: If addon version is available
     )
     _LOGGER.debug(f"Ensured main device exists for entry ID: {entry.entry_id}")
