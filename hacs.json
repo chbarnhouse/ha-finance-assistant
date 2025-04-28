@@ -1,4 +1,6 @@
 {
   "name": "Finance Assistant",
-  "homeassistant": "2023.1.0"
+  "homeassistant": "2023.1.0",
+  "render_readme": true,
+  "icon": "mdi:finance"
 }
