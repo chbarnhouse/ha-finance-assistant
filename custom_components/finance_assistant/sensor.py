@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util # Import datetime utilities
+from homeassistant.helpers.entity import DeviceInfo
 
 from .const import DOMAIN
 from . import FinanceAssistantDataUpdateCoordinator # Import directly from __init__.py
@@ -22,38 +23,48 @@ _LOGGER = logging.getLogger(__name__)
 
 # Define sensor types
 SENSOR_TYPES = {
-    "ynab_cash_balance": {"name": "YNAB Cash Balance", "icon": "mdi:cash"},
-    "ynab_cash_liquid": {"name": "YNAB Cash Liquid", "icon": "mdi:cash-fast"},
-    "ynab_cash_frozen": {"name": "YNAB Cash Frozen", "icon": "mdi:cash-lock"},
-    "ynab_cash_deep_freeze": {"name": "YNAB Cash Deep Freeze", "icon": "mdi:cash-lock-open"},
-    "ynab_credit_balance": {"name": "YNAB Credit Balance", "icon": "mdi:credit-card"},
+    "ynab_cash_balance": {"name": "YNAB Cash Balance", "icon": "mdi:cash", "category": "YNAB Summary"},
+    "ynab_cash_liquid": {"name": "YNAB Cash Liquid", "icon": "mdi:cash-fast", "category": "YNAB Summary"},
+    "ynab_cash_frozen": {"name": "YNAB Cash Frozen", "icon": "mdi:cash-lock", "category": "YNAB Summary"},
+    "ynab_cash_deep_freeze": {"name": "YNAB Cash Deep Freeze", "icon": "mdi:cash-lock-open", "category": "YNAB Summary"},
+    "ynab_credit_balance": {"name": "YNAB Credit Balance", "icon": "mdi:credit-card", "category": "YNAB Summary"},
     # Transaction Summaries - Today
-    "transactions_today_inflow": {"name": "Transactions Today Inflow", "icon": "mdi:arrow-down-bold-circle-outline"},
-    "transactions_today_outflow": {"name": "Transactions Today Outflow", "icon": "mdi:arrow-up-bold-circle-outline"},
-    "transactions_today_net": {"name": "Transactions Today Net", "icon": "mdi:swap-vertical-bold"},
+    "transactions_today_inflow": {"name": "Transactions Today Inflow", "icon": "mdi:arrow-down-bold-circle-outline", "category": "Transaction Summary"},
+    "transactions_today_outflow": {"name": "Transactions Today Outflow", "icon": "mdi:arrow-up-bold-circle-outline", "category": "Transaction Summary"},
+    "transactions_today_net": {"name": "Transactions Today Net", "icon": "mdi:swap-vertical-bold", "category": "Transaction Summary"},
     # Transaction Summaries - Next 7 Days (Scheduled)
-    "scheduled_next_7_days_inflow": {"name": "Scheduled Next 7 Days Inflow", "icon": "mdi:arrow-down-bold-circle-outline"},
-    "scheduled_next_7_days_outflow": {"name": "Scheduled Next 7 Days Outflow", "icon": "mdi:arrow-up-bold-circle-outline"},
-    "scheduled_next_7_days_net": {"name": "Scheduled Next 7 Days Net", "icon": "mdi:swap-vertical-bold"},
+    "scheduled_next_7_days_inflow": {"name": "Scheduled Next 7 Days Inflow", "icon": "mdi:arrow-down-bold-circle-outline", "category": "Transaction Summary"},
+    "scheduled_next_7_days_outflow": {"name": "Scheduled Next 7 Days Outflow", "icon": "mdi:arrow-up-bold-circle-outline", "category": "Transaction Summary"},
+    "scheduled_next_7_days_net": {"name": "Scheduled Next 7 Days Net", "icon": "mdi:swap-vertical-bold", "category": "Transaction Summary"},
     # Transaction Summaries - Next 30 Days (Scheduled)
-    "scheduled_next_30_days_inflow": {"name": "Scheduled Next 30 Days Inflow", "icon": "mdi:arrow-down-bold-circle-outline"},
-    "scheduled_next_30_days_outflow": {"name": "Scheduled Next 30 Days Outflow", "icon": "mdi:arrow-up-bold-circle-outline"},
-    "scheduled_next_30_days_net": {"name": "Scheduled Next 30 Days Net", "icon": "mdi:swap-vertical-bold"},
+    "scheduled_next_30_days_inflow": {"name": "Scheduled Next 30 Days Inflow", "icon": "mdi:arrow-down-bold-circle-outline", "category": "Transaction Summary"},
+    "scheduled_next_30_days_outflow": {"name": "Scheduled Next 30 Days Outflow", "icon": "mdi:arrow-up-bold-circle-outline", "category": "Transaction Summary"},
+    "scheduled_next_30_days_net": {"name": "Scheduled Next 30 Days Net", "icon": "mdi:swap-vertical-bold", "category": "Transaction Summary"},
     # Next Inflow/Outflow (Scheduled)
-    "scheduled_next_inflow_date": {"name": "Scheduled Next Inflow Date", "icon": "mdi:calendar-arrow-down"},
-    "scheduled_next_inflow_amount": {"name": "Scheduled Next Inflow Amount", "icon": "mdi:cash-plus"},
-    "scheduled_next_outflow_date": {"name": "Scheduled Next Outflow Date", "icon": "mdi:calendar-arrow-up"},
-    "scheduled_next_outflow_amount": {"name": "Scheduled Next Outflow Amount", "icon": "mdi:cash-minus"},
+    "scheduled_next_inflow_date": {"name": "Scheduled Next Inflow Date", "icon": "mdi:calendar-arrow-down", "category": "Transaction Summary"},
+    "scheduled_next_inflow_amount": {"name": "Scheduled Next Inflow Amount", "icon": "mdi:cash-plus", "category": "Transaction Summary"},
+    "scheduled_next_outflow_date": {"name": "Scheduled Next Outflow Date", "icon": "mdi:calendar-arrow-up", "category": "Transaction Summary"},
+    "scheduled_next_outflow_amount": {"name": "Scheduled Next Outflow Amount", "icon": "mdi:cash-minus", "category": "Transaction Summary"},
     # Calculated Financial Metrics
-    "total_outflow_until_next_inflow": {"name": "Total Outflow Until Next Inflow", "icon": "mdi:cash-sync"},
-    "can_pay_off_cards_in_full": {"name": "Can Pay Off Cards In Full", "icon": "mdi:credit-card-check-outline"},
-    # Analytics (Placeholders)
-    "analytics_net_worth": {"name": "Analytics Net Worth", "icon": "mdi:chart-line"},
-    "analytics_total_student_debt": {"name": "Analytics Total Student Debt", "icon": "mdi:school-outline"},
-    "analytics_total_car_loan": {"name": "Analytics Total Car Loan", "icon": "mdi:car-outline"},
-    "analytics_sps_stock": {"name": "Analytics SPS Stock Value", "icon": "mdi:finance"},
+    "total_outflow_until_next_inflow": {"name": "Total Outflow Until Next Inflow", "icon": "mdi:cash-sync", "category": "Analytics"},
+    "can_pay_off_cards_in_full": {"name": "Can Pay Off Cards In Full", "icon": "mdi:credit-card-check-outline", "category": "Analytics"},
+    # Analytics
+    "analytics_net_worth": {"name": "Analytics Net Worth", "icon": "mdi:chart-line", "category": "Analytics"},
+    "analytics_total_student_debt": {"name": "Analytics Total Student Debt", "icon": "mdi:school-outline", "category": "Analytics"},
+    "analytics_total_car_loan": {"name": "Analytics Total Car Loan", "icon": "mdi:car-outline", "category": "Analytics"},
+    "analytics_sps_stock": {"name": "Analytics SPS Stock Value", "icon": "mdi:finance", "category": "Analytics"},
     # Add other sensor types later
 }
+
+# Helper function to generate device info
+def _get_device_info(config_entry_id: str, category_key: str, category_name: str) -> DeviceInfo:
+    """Return device information for a specific category."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{config_entry_id}-{category_key}")},
+        name=f"Finance Assistant {category_name}",
+        manufacturer="Finance Assistant Addon",
+        via_device=(DOMAIN, config_entry_id) # Link to the main integration config entry device
+    )
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -79,24 +90,25 @@ async def async_setup_entry(
     _LOGGER.debug(f"DEBUG: Coordinator data content *after* first refresh: {str(coordinator.data)[:1000]}")
 
     entities = []
+    config_entry_id = entry.entry_id
 
-    # 1. Create main account sensors (existing logic)
+    # 1. Create main account sensors
     _LOGGER.debug(f"DEBUG: Coordinator data type before account sensor setup: {type(coordinator.data)}")
     _LOGGER.debug(f"DEBUG: Coordinator data content before account sensor setup: {str(coordinator.data)[:1000]}") # Log first 1000 chars
 
     if coordinator.data and isinstance(coordinator.data, dict) and coordinator.data.get("accounts") is not None:
-        # Further check if accounts is actually a list
         accounts_data = coordinator.data.get("accounts", [])
         if isinstance(accounts_data, list):
             _LOGGER.debug(f"Setting up {len(accounts_data)} Account sensors")
+            account_device_info = _get_device_info(config_entry_id, "accounts", "Accounts")
             entities.extend(
                 FinanceAssistantAccountSensor(
                     coordinator,
                     account_data["id"],
                     account_data.get("name", "Unknown Account"),
+                    account_device_info, # Pass device info
                 )
                 for account_data in accounts_data
-                # Add filtering if needed (e.g., exclude closed)
                 if isinstance(account_data, dict) and not account_data.get("deleted", False)
             )
         else:
@@ -108,7 +120,7 @@ async def async_setup_entry(
     _LOGGER.debug(f"SENSOR_SETUP: Final check before entity creation - Data type: {type(coordinator.data)}")
     _LOGGER.debug(f"SENSOR_SETUP: Final check before entity creation - Data content: {str(coordinator.data)[:1000]}")
 
-    # 2. Create asset sensors (existing logic)
+    # 2. Create asset sensors
     _LOGGER.debug(f"DEBUG: Coordinator data type before asset sensor setup: {type(coordinator.data)}")
     _LOGGER.debug(f"DEBUG: Coordinator data content before asset sensor setup: {str(coordinator.data)[:1000]}") # Log first 1000 chars
 
@@ -116,11 +128,13 @@ async def async_setup_entry(
         assets_data = coordinator.data.get("assets", [])
         if isinstance(assets_data, list):
             _LOGGER.debug(f"Setting up {len(assets_data)} Asset sensors")
+            asset_device_info = _get_device_info(config_entry_id, "assets", "Assets")
             entities.extend(
                 FinanceAssistantAssetSensor(
                     coordinator,
                     asset_data["id"],
                     asset_data.get("name", "Unknown Asset"),
+                    asset_device_info, # Pass device info
                 )
                 for asset_data in assets_data
                 if isinstance(asset_data, dict) and not asset_data.get("deleted", False)
@@ -130,20 +144,83 @@ async def async_setup_entry(
     else:
         _LOGGER.warning("No valid 'assets' data found in coordinator (or data is not a dict), cannot setup asset sensors.")
 
-    # 3. Create Liability sensors (if needed - not explicitly requested as individual sensors)
-    # ... similar logic ...
+    # 3. Create Liability sensors
+    _LOGGER.debug(f"DEBUG: Coordinator data type before liability sensor setup: {type(coordinator.data)}")
+    _LOGGER.debug(f"DEBUG: Coordinator data content before liability sensor setup: {str(coordinator.data)[:1000]}")
 
-    # 4. Create Credit Card sensors (if needed - not explicitly requested as individual sensors)
-    # ... similar logic ...
+    if coordinator.data and isinstance(coordinator.data, dict) and coordinator.data.get("liabilities") is not None:
+        liabilities_data = coordinator.data.get("liabilities", [])
+        if isinstance(liabilities_data, list):
+            _LOGGER.debug(f"Setting up {len(liabilities_data)} Liability sensors")
+            liability_device_info = _get_device_info(config_entry_id, "liabilities", "Liabilities")
+            entities.extend(
+                FinanceAssistantLiabilitySensor(
+                    coordinator,
+                    liability_data["id"],
+                    liability_data.get("name", "Unknown Liability"),
+                    liability_device_info, # Pass device info
+                )
+                for liability_data in liabilities_data
+                if isinstance(liability_data, dict) and not liability_data.get("deleted", False) and not liability_data.get("closed", False)
+            )
+        else:
+             _LOGGER.warning(f"'liabilities' key found in coordinator data, but it's not a list (Type: {type(liabilities_data)}). Skipping liability sensors.")
+    else:
+        _LOGGER.warning("No valid 'liabilities' data found in coordinator (or data is not a dict), cannot setup liability sensors.")
 
-    # 5. Create Summary/Calculated Sensors
-    _LOGGER.debug("Setting up Summary sensors")
-    # Add check for coordinator data before setting up summary sensors
+    # 4. Create Credit Card sensors
+    _LOGGER.debug(f"DEBUG: Coordinator data type before credit card sensor setup: {type(coordinator.data)}")
+    _LOGGER.debug(f"DEBUG: Coordinator data content before credit card sensor setup: {str(coordinator.data)[:1000]}")
+
+    if coordinator.data and isinstance(coordinator.data, dict) and coordinator.data.get("credit_cards") is not None:
+        credit_cards_data = coordinator.data.get("credit_cards", [])
+        if isinstance(credit_cards_data, list):
+            _LOGGER.debug(f"Setting up {len(credit_cards_data)} Credit Card sensors")
+            credit_card_device_info = _get_device_info(config_entry_id, "credit_cards", "Credit Cards")
+            entities.extend(
+                FinanceAssistantCreditCardSensor(
+                    coordinator,
+                    card_data["id"],
+                    card_data.get("name", "Unknown Credit Card"),
+                    credit_card_device_info, # Pass device info
+                )
+                for card_data in credit_cards_data
+                if isinstance(card_data, dict) and not card_data.get("deleted", False) and not card_data.get("closed", False)
+            )
+        else:
+             _LOGGER.warning(f"'credit_cards' key found in coordinator data, but it's not a list (Type: {type(credit_cards_data)}). Skipping credit card sensors.")
+    else:
+        _LOGGER.warning("No valid 'credit_cards' data found in coordinator (or data is not a dict), cannot setup credit card sensors.")
+
+    # 5. Create Summary/Calculated Sensors by Category
+    _LOGGER.debug("Setting up Summary sensors by category")
     if coordinator.data and isinstance(coordinator.data, dict):
-        entities.extend(
-            FinanceAssistantSummarySensor(coordinator, sensor_key, details["name"], details["icon"])
-            for sensor_key, details in SENSOR_TYPES.items()
-        )
+        # Group sensors by category
+        sensors_by_category = {}
+        for sensor_key, details in SENSOR_TYPES.items():
+            category_name = details.get("category")
+            if not category_name:
+                _LOGGER.warning(f"Sensor type '{sensor_key}' missing 'category' definition. Skipping.")
+                continue
+            if category_name not in sensors_by_category:
+                sensors_by_category[category_name] = []
+            sensors_by_category[category_name].append((sensor_key, details))
+
+        # Create entities for each category with appropriate device info
+        for category_name, sensors in sensors_by_category.items():
+            category_key = category_name.lower().replace(" ", "_") # e.g., ynab_summary
+            device_info = _get_device_info(config_entry_id, category_key, category_name)
+            _LOGGER.debug(f"Creating {len(sensors)} sensors for category '{category_name}' with device {category_key}")
+            entities.extend(
+                FinanceAssistantSummarySensor(
+                    coordinator,
+                    sensor_key,
+                    details["name"],
+                    details["icon"],
+                    device_info, # Pass device info
+                )
+                for sensor_key, details in sensors
+            )
     else:
         _LOGGER.warning("Coordinator data is not a valid dictionary. Skipping summary sensors.")
 
@@ -187,18 +264,7 @@ class FinanceAssistantBaseSensor(CoordinatorEntity):
     def __init__(self, coordinator: FinanceAssistantDataUpdateCoordinator):
         super().__init__(coordinator)
         # No context handling - it conflicts with HA's internal context system
-
-    @property
-    def device_info(self):
-        """Return device information for grouping."""
-        # All sensors belong to the same "device" representing the integration instance
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.config_entry.entry_id)},
-            "name": "Finance Assistant",
-            "manufacturer": "Finance Assistant Addon",
-            # "model": "Software",
-            # "sw_version": self.coordinator.data.get("version", "unknown"),
-        }
+        # Device info is now handled by specific sensor classes
 
     @property
     def unit_of_measurement(self):
@@ -217,12 +283,13 @@ class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
     _attr_native_unit_of_measurement = CURRENCY_DOLLAR
     _attr_suggested_display_precision = 2 # Set precision via class attribute
 
-    def __init__(self, coordinator, account_id, account_name):
+    def __init__(self, coordinator, account_id, account_name, device_info: DeviceInfo):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._account_id = account_id
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_account_{account_id}"
         self._attr_name = account_name
+        self._attr_device_info = device_info # Assign device info passed from setup
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
         self._entity_picture = None
@@ -368,7 +435,7 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
     _attr_native_unit_of_measurement = CURRENCY_DOLLAR
     _attr_suggested_display_precision = 2 # Set precision via class attribute
 
-    def __init__(self, coordinator, asset_id, asset_name):
+    def __init__(self, coordinator, asset_id, asset_name, device_info: DeviceInfo):
         """Initialize the sensor."""
         _LOGGER.debug(
             f"SENSOR_INIT AssetSensor ({asset_name}/{asset_id}): Coordinator data type: {type(coordinator.data)}"
@@ -390,6 +457,7 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
         self._asset_id = asset_id
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_asset_{asset_id}"
         self._attr_name = asset_name
+        self._attr_device_info = device_info # Assign device info passed from setup
         self._attr_native_value = None
         self._attr_extra_state_attributes = {}
         self._original_name = asset_name
@@ -503,33 +571,282 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
             self.async_write_ha_state()
 
 
+# --- Liability Sensor ---
+class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
+    """Representation of a Finance Assistant liability balance sensor."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = CURRENCY_DOLLAR
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator, liability_id, liability_name, device_info: DeviceInfo):
+        """Initialize the liability sensor."""
+        super().__init__(coordinator)
+        self._liability_id = liability_id
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_liability_{liability_id}"
+        self._attr_name = liability_name
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+        self._original_name = liability_name
+        self._last_liability_data = None
+
+        _LOGGER.debug(f"LiabilitySensor initialized: ID={liability_id}, Name={liability_name}")
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity about to be added to hass."""
+        await super().async_added_to_hass()
+        self._handle_coordinator_update()
+
+    @property
+    def state(self):
+        """Return the state (balance)."""
+        try:
+            # Liabilities balance is negative in YNAB, show as positive debt value
+            return f"{abs(float(self._attr_native_value)):.2f}"
+        except (TypeError, ValueError):
+            _LOGGER.warning(f"Could not format state for liability {self._attr_name}: {self._attr_native_value}")
+            return "0.00"
+
+    def _update_internal_state(self, liability_name):
+        """Update the sensor's internal state."""
+        if not self.coordinator.data or not isinstance(self.coordinator.data, dict):
+            self._attr_available = False
+            return
+
+        liabilities = self.coordinator.data.get("liabilities", [])
+        liability_data = self._find_data_by_id(liabilities, self._liability_id)
+
+        if liability_data:
+            if liability_data == self._last_liability_data:
+                self._attr_available = True
+                return
+
+            self._attr_native_value = ynab_milliunits_to_float(liability_data.get("balance"))
+            self._attr_name = liability_data.get("name", self._original_name)
+
+            new_attributes = {
+                "ynab_id": liability_data.get("id"),
+                "ynab_type": liability_data.get("type"),
+                "liability_type": liability_data.get("liability_type"), # Manual type
+                "bank": liability_data.get("bank"), # Manual bank
+                "on_budget": liability_data.get("on_budget"),
+                "closed": liability_data.get("closed"),
+                "cleared_balance": ynab_milliunits_to_float(liability_data.get("cleared_balance")),
+                "uncleared_balance": ynab_milliunits_to_float(liability_data.get("uncleared_balance")),
+                "transfer_payee_id": liability_data.get("transfer_payee_id"),
+                "last_reconciled_at": liability_data.get("last_reconciled_at"),
+                "deleted": liability_data.get("deleted"),
+                "starting_balance": liability_data.get("starting_balance"),
+                "start_date": liability_data.get("start_date"),
+                "interest_rate": liability_data.get("interest_rate"),
+                # Original YNAB debt fields for reference
+                "debt_original_balance": ynab_milliunits_to_float(liability_data.get("debt_original_balance")),
+                "debt_interest_rates": liability_data.get("debt_interest_rates"),
+                "debt_minimum_payments": liability_data.get("debt_minimum_payments"),
+                "debt_escrow_amounts": liability_data.get("debt_escrow_amounts"),
+            }
+            self._attr_extra_state_attributes = {k: v for k, v in new_attributes.items() if v is not None}
+            self._attr_available = True
+            self._last_liability_data = liability_data
+        else:
+            self._attr_available = False
+            self._last_liability_data = None
+
+    def _find_data_by_id(self, data_list, target_id):
+        """Helper to find the specific liability data by ID."""
+        return next((item for item in data_list if isinstance(item, dict) and item.get("id") == target_id), None)
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data is not None
+            and isinstance(self.coordinator.data, dict)
+        )
+
+    async def async_update(self) -> None:
+        await self.coordinator.async_request_refresh()
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        if not self.coordinator.data or "liabilities" not in self.coordinator.data:
+            return
+
+        liabilities_list = self.coordinator.data.get("liabilities", [])
+        if not isinstance(liabilities_list, list):
+            return
+
+        liability_data = next((item for item in liabilities_list if item.get('id') == self._liability_id), None)
+
+        if liability_data:
+            self._update_internal_state(liability_data.get('name', 'Unknown Liability'))
+            self.async_write_ha_state()
+
+
+# --- Credit Card Sensor ---
+class FinanceAssistantCreditCardSensor(FinanceAssistantBaseSensor):
+    """Representation of a Finance Assistant credit card balance sensor."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = CURRENCY_DOLLAR
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator, card_id, card_name, device_info: DeviceInfo):
+        """Initialize the credit card sensor."""
+        super().__init__(coordinator)
+        self._card_id = card_id
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_credit_card_{card_id}"
+        self._attr_name = card_name
+        self._attr_device_info = device_info
+        self._attr_native_value = None
+        self._attr_extra_state_attributes = {}
+        self._original_name = card_name
+        self._last_card_data = None
+
+        _LOGGER.debug(f"CreditCardSensor initialized: ID={card_id}, Name={card_name}")
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity about to be added to hass."""
+        await super().async_added_to_hass()
+        self._handle_coordinator_update()
+
+    @property
+    def state(self):
+        """Return the state (balance)."""
+        try:
+             # Credit card balance is negative in YNAB, show as positive debt value
+            return f"{abs(float(self._attr_native_value)):.2f}"
+        except (TypeError, ValueError):
+            _LOGGER.warning(f"Could not format state for credit card {self._attr_name}: {self._attr_native_value}")
+            return "0.00"
+
+    def _update_internal_state(self, card_name):
+        """Update the sensor's internal state."""
+        if not self.coordinator.data or not isinstance(self.coordinator.data, dict):
+            self._attr_available = False
+            return
+
+        credit_cards = self.coordinator.data.get("credit_cards", [])
+        card_data = self._find_data_by_id(credit_cards, self._card_id)
+
+        if card_data:
+            if card_data == self._last_card_data:
+                self._attr_available = True
+                return
+
+            self._attr_native_value = ynab_milliunits_to_float(card_data.get("balance"))
+
+            # Determine display name based on manual settings
+            manual_bank_name = card_data.get("bank")
+            include_bank = card_data.get("include_bank_in_name", True) # Default true if missing
+            base_name = card_data.get("card_name", self._original_name) # Use manual card_name first
+
+            if include_bank and manual_bank_name:
+                self._attr_name = f"{manual_bank_name} {base_name}"
+            else:
+                self._attr_name = base_name
+
+            new_attributes = {
+                "ynab_id": card_data.get("id"),
+                "ynab_name": card_data.get("name"), # Original YNAB name
+                "ynab_type": card_data.get("type"),
+                "bank": card_data.get("bank"),
+                "last_4_digits": card_data.get("last_4_digits"),
+                "expiration_date": card_data.get("expiration_date"),
+                "auto_pay_day_1": card_data.get("auto_pay_day_1"),
+                "auto_pay_day_2": card_data.get("auto_pay_day_2"),
+                "credit_limit": card_data.get("credit_limit"),
+                "payment_methods": card_data.get("payment_methods"),
+                "notes": card_data.get("notes"), # Manual notes
+                "ynab_note": card_data.get("note"), # YNAB notes
+                "on_budget": card_data.get("on_budget"),
+                "closed": card_data.get("closed"),
+                "cleared_balance": ynab_milliunits_to_float(card_data.get("cleared_balance")),
+                "uncleared_balance": ynab_milliunits_to_float(card_data.get("uncleared_balance")),
+                "transfer_payee_id": card_data.get("transfer_payee_id"),
+                "last_reconciled_at": card_data.get("last_reconciled_at"),
+                "deleted": card_data.get("deleted"),
+                # Basic Reward Info (more complex structure later)
+                "reward_structure_type": card_data.get("reward_structure_type"),
+                "base_rate": card_data.get("base_rate"),
+            }
+            self._attr_extra_state_attributes = {k: v for k, v in new_attributes.items() if v is not None}
+            self._attr_available = True
+            self._last_card_data = card_data
+        else:
+            self._attr_available = False
+            self._last_card_data = None
+
+    def _find_data_by_id(self, data_list, target_id):
+        """Helper to find the specific credit card data by ID."""
+        return next((item for item in data_list if isinstance(item, dict) and item.get("id") == target_id), None)
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data is not None
+            and isinstance(self.coordinator.data, dict)
+        )
+
+    async def async_update(self) -> None:
+        await self.coordinator.async_request_refresh()
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        if not self.coordinator.data or "credit_cards" not in self.coordinator.data:
+            return
+
+        credit_cards_list = self.coordinator.data.get("credit_cards", [])
+        if not isinstance(credit_cards_list, list):
+            return
+
+        card_data = next((item for item in credit_cards_list if item.get('id') == self._card_id), None)
+
+        if card_data:
+            self._update_internal_state(card_data.get('name', 'Unknown Credit Card'))
+            self.async_write_ha_state()
+
+
 # --- Summary/Calculated Sensor ---
 class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
     """Sensor for summary values calculated from coordinator data."""
-    def __init__(self, coordinator, sensor_key, sensor_name, sensor_icon):
+    def __init__(self, coordinator, sensor_key, sensor_name, sensor_icon, device_info: DeviceInfo):
         """Initialize the summary sensor."""
         super().__init__(coordinator)
-        self._sensor_key = sensor_key  # Store key explicitly
+        self._sensor_key = sensor_key
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_summary_{sensor_key}"
         self._attr_name = sensor_name
         self._attr_icon = sensor_icon
-        self._attr_unique_id = f"fa_summary_{sensor_key}"
+        self._attr_device_info = device_info # Assign device info passed from setup
 
-        # Set device class and state class based on sensor type
-        if "date" in sensor_key:
-            self._attr_device_class = SensorDeviceClass.DATE
-            self._attr_native_unit_of_measurement = None
-            self._attr_state_class = None # Dates don't have a state class
-            self._attr_suggested_display_precision = None
-        elif "can_pay" in sensor_key:
-             self._attr_device_class = None # Boolean - no specific device class
-             self._attr_native_unit_of_measurement = None
-             self._attr_state_class = None
-             self._attr_suggested_display_precision = None
-        else: # Default to monetary
+        # Determine device class and state class based on key
+        if "balance" in sensor_key or "amount" in sensor_key or "inflow" in sensor_key or "outflow" in sensor_key or "net" in sensor_key or "_value" in sensor_key or "_debt" in sensor_key or sensor_key == "can_pay_off_cards_in_full" or sensor_key == "total_outflow_until_next_inflow":
             self._attr_device_class = SensorDeviceClass.MONETARY
+            self._attr_state_class = SensorStateClass.TOTAL # Measurement or Total?
             self._attr_native_unit_of_measurement = CURRENCY_DOLLAR
-            self._attr_state_class = SensorStateClass.MEASUREMENT # Use MEASUREMENT for calculated values
             self._attr_suggested_display_precision = 2
+        elif "date" in sensor_key:
+            self._attr_device_class = SensorDeviceClass.DATE
+            self._attr_state_class = None # Dates don't have state class
+            self._attr_native_unit_of_measurement = None
+        else:
+            # Default for other types (e.g., counts, maybe ratios later)
+            self._attr_device_class = None
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+            self._attr_native_unit_of_measurement = None
+
+        self._attr_native_value = self._default_state()
+        self._attr_extra_state_attributes = {ATTR_ATTRIBUTION: "Data provided by YNAB"}
+
+        _LOGGER.debug(f"SummarySensor initialized: Key={sensor_key}, Name={sensor_name}, Device={device_info['name']}")
 
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
