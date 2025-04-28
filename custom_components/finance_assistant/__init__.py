@@ -120,18 +120,21 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         self.supervisor_token = os.getenv("SUPERVISOR_TOKEN")
 
         # Define BOTH base URLs initially
-        self.supervisor_api_base_url = f"http://supervisor/addons/{self.addon_slug}/api"
-        # Default direct URL assumes production fallback using slug
-        self.direct_api_base_url = f"http://{self.addon_slug}:8000/api"
+        self.supervisor_url = f"http://supervisor/addons/{addon_slug}/api"
+        # !!! WORKAROUND !!! Use 'homeassistant:8000' instead of slug due to DNS issues
+        # self.direct_url = f"http://{addon_slug}:{direct_port}/api"
+        self.direct_url = f"http://homeassistant:{direct_port}/api"
+        _LOGGER.info(f"Supervisor URL: {self.supervisor_url}")
+        _LOGGER.info(f"Direct URL (WORKAROUND): {self.direct_url}")
 
         # If no supervisor token, assume dev environment and set direct URL to host.docker.internal
         if not self.supervisor_token:
              _LOGGER.info("No SUPERVISOR_TOKEN found. Assuming dev environment, setting direct URL to host.docker.internal.")
-             self.direct_api_base_url = "http://host.docker.internal:8000/api"
+             self.direct_url = "http://host.docker.internal:8000/api"
         # else: # Optional: Log if we are in Supervisor mode
         #     _LOGGER.info("SUPERVISOR_TOKEN found. Assuming Supervisor environment.")
 
-        _LOGGER.debug(f"Coordinator initialized. Supervisor URL base: {self.supervisor_api_base_url}, Direct URL base: {self.direct_api_base_url}")
+        _LOGGER.debug(f"Coordinator initialized. Supervisor URL base: {self.supervisor_url}, Direct URL base: {self.direct_url}")
 
     async def _request(self, method, endpoint, params=None, data=None, json_data=None):
         """Make an API request, trying the appropriate method based on environment."""
@@ -147,15 +150,15 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
 
         if self.supervisor_token:
             # Production/Supervisor: Try Supervisor first, fallback to Direct (slug)
-            primary_url = f"{self.supervisor_api_base_url}/{endpoint_clean}"
+            primary_url = f"{self.supervisor_url}/{endpoint_clean}"
             primary_method = "Supervisor"
-            secondary_url = f"{self.direct_api_base_url}/{endpoint_clean}" # Uses slug hostname here
+            secondary_url = f"{self.direct_url}/{endpoint_clean}" # Uses slug hostname here
             secondary_method = "Direct (via slug)"
             headers = {"Authorization": f"Bearer {self.supervisor_token}"}
             _LOGGER.debug(f"Supervisor env detected. Primary: {primary_method}, Secondary: {secondary_method}")
         else:
             # Dev environment: Prioritize Direct (host.docker.internal)
-            primary_url = f"{self.direct_api_base_url}/{endpoint_clean}" # Uses host.docker.internal here
+            primary_url = f"{self.direct_url}/{endpoint_clean}" # Uses host.docker.internal here
             primary_method = "Direct (via host.docker.internal)"
             # No Supervisor fallback possible without token
             secondary_url = None
@@ -262,10 +265,53 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             # Use the ROOT '/ping' endpoint for verification now
             _LOGGER.info(f"Attempting API ping (using root /ping endpoint)...")
-            await self._request("GET", "/ping") # Use root ping endpoint
-            _LOGGER.info("Finance Assistant API connection verified successfully.")
-            return True
-        # Catch UpdateFailed specifically from _request
+            # Use the _request method, which handles supervisor/direct logic automatically
+            # It needs the relative path (without /api prefix) for the root endpoint
+            # Construct the full URL manually for the root ping, respecting the workaround
+            ping_url_supervisor = f"http://supervisor/addons/{self.addon_slug}/ping"
+            ping_url_direct = f"http://homeassistant:{self.direct_port}/ping" # WORKAROUND URL
+
+            last_error = None
+            # Try Supervisor first
+            try:
+                _LOGGER.debug(f"Trying Supervisor ping: {ping_url_supervisor}")
+                async with self.websession.get(ping_url_supervisor, headers=self.supervisor_headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if 200 <= response.status < 300:
+                        _LOGGER.info("Supervisor ping successful.")
+                        return True
+                    else:
+                        response_text = await response.text()
+                        _LOGGER.warning(f"Supervisor ping failed ({response.status}): {response_text[:100]}...")
+                        last_error = UpdateFailed(f"Supervisor ping failed ({response.status})")
+            except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
+                _LOGGER.warning(f"Supervisor ping connection error: {err}")
+                last_error = UpdateFailed(f"Supervisor ping connection error: {err}")
+            except Exception as err:
+                _LOGGER.error(f"Unexpected Supervisor ping error: {err}", exc_info=True)
+                last_error = UpdateFailed(f"Unexpected Supervisor ping error: {err}")
+
+            # Try Direct (Workaround) if Supervisor failed
+            if last_error:
+                try:
+                    _LOGGER.info(f"Supervisor ping failed. Trying Direct (Workaround) ping: {ping_url_direct}")
+                    async with self.websession.get(ping_url_direct, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                        if 200 <= response.status < 300:
+                            _LOGGER.info("Direct (Workaround) ping successful.")
+                            return True
+                        else:
+                            response_text = await response.text()
+                            _LOGGER.error(f"Direct (Workaround) ping failed ({response.status}): {response_text[:100]}...")
+                            raise UpdateFailed(f"Direct (Workaround) ping failed ({response.status})") # Raise error if direct fails
+                except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
+                    _LOGGER.error(f"Direct (Workaround) ping connection error: {err}")
+                    raise UpdateFailed(f"Direct (Workaround) ping connection error: {err}") # Raise error if direct fails
+                except Exception as err:
+                    _LOGGER.error(f"Unexpected Direct (Workaround) ping error: {err}", exc_info=True)
+                    raise UpdateFailed(f"Unexpected Direct (Workaround) ping error: {err}") # Raise error if direct fails
+
+            # If we reach here, both attempts failed
+            _LOGGER.error(f"Finance Assistant API connection verification failed after all attempts. Last Supervisor error: {last_error}")
+            raise ConfigEntryNotReady(f"Finance Assistant API connection failed: {last_error}")
         except UpdateFailed as err:
              _LOGGER.error(f"Finance Assistant API connection verification failed: {err}")
              raise ConfigEntryNotReady(f"Finance Assistant API connection failed: {err}") from err
