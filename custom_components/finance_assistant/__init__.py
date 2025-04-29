@@ -145,18 +145,15 @@ def async_register_services(hass: HomeAssistant, coordinator):
 
             # 6. Call YNAB API via coordinator's client
             try:
-                # We need the YnabClient instance from the coordinator
-                # This might require exposing it or adding a method to the coordinator
-                # For now, let's assume we can access it (will need refinement)
-                # ynab_client = coordinator.ynab_client # Assuming this exists
-
-                # Let's try accessing via hass.data for now, needs adjustment
-                if not hasattr(coordinator, '_get_ynab_client') or not await coordinator._get_ynab_client():
-                     _LOGGER.error(f"Failed to update {asset['name']}: Could not get YNAB client from coordinator.")
+                # Get the ApiClient from the coordinator
+                api_client = await coordinator._get_ynab_client()
+                if not api_client:
+                     _LOGGER.error(f"Failed to update {asset['name']}: Could not get YNAB ApiClient from coordinator.")
                      failed_updates += 1
                      continue
 
-                ynab_client = await coordinator._get_ynab_client()
+                # Instantiate the AccountsApi
+                accounts_api = AccountsApi(api_client)
 
                 # YNAB API requires balance in milliunits and current date
                 update_payload = {
@@ -164,7 +161,6 @@ def async_register_services(hass: HomeAssistant, coordinator):
                         "balance": new_value_milliunits
                     }
                 }
-                # The python library uses update_account, takes budget_id, account_id, payload
                 # budget_id should be available from config entry
                 budget_id = coordinator.config_entry.data.get("ynab_budget_id")
                 if not budget_id:
@@ -173,8 +169,8 @@ def async_register_services(hass: HomeAssistant, coordinator):
                     continue
 
                 _LOGGER.info(f"Updating YNAB account {ynab_id} for budget {budget_id} with balance {new_value_milliunits}")
-                # Assuming ynab_client has an accounts attribute which has an update_account method
-                await ynab_client.accounts.update_account(budget_id, ynab_id, update_payload)
+                # Call update_account on the AccountsApi instance
+                await accounts_api.update_account(budget_id, ynab_id, update_payload)
                 _LOGGER.info(f"Successfully submitted update for asset {asset['name']} to YNAB.")
                 successful_updates += 1
 
@@ -299,7 +295,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 # --- Need to add YNAB client initialization and access --- NEW ---
-from ynab_api import ApiClient, Configuration, YNABAPI
+from ynab_api import ApiClient, Configuration
+from ynab_api.api import AccountsApi # Import specific API class
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
@@ -350,7 +347,7 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         self.config_entry = entry # Store config_entry if needed elsewhere
 
     async def _get_ynab_client(self):
-        """Initializes and returns the YNAB API client if config is valid."""
+        """Initializes and returns the YNAB API **ApiClient** instance if config is valid."""
         if self._ynab_client:
             return self._ynab_client
 
@@ -363,9 +360,9 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         configuration.api_key['Authorization'] = ynab_api_key
         configuration.api_key_prefix['Authorization'] = 'Bearer'
 
-        # Use YNABAPI wrapper which handles rate limiting etc.
-        self._ynab_client = YNABAPI(configuration)
-        _LOGGER.info("YNAB API Client initialized.")
+        # Return the configured ApiClient instance
+        self._ynab_client = ApiClient(configuration)
+        _LOGGER.info("YNAB ApiClient initialized.")
         return self._ynab_client
 
     async def _request(self, method, endpoint, params=None, data=None, json_data=None):
