@@ -169,7 +169,9 @@ def async_register_services(hass: HomeAssistant, coordinator):
             if len(import_id) > 36:
                 import_id = import_id[:36]
 
-            transaction_payload = SaveTransaction(
+            # Need SaveTransaction model
+            # Use ynab_api namespace
+            transaction_payload_model = ynab_api.SaveTransaction(
                 account_id=ynab_id,
                 date=today_date,
                 amount=adjustment_milliunits,
@@ -190,7 +192,8 @@ def async_register_services(hass: HomeAssistant, coordinator):
                      continue
 
                 # Instantiate the TransactionsApi
-                transactions_api_instance = transactions_api.TransactionsApi(api_client)
+                # Use ynab_api namespace
+                transactions_api_instance = ynab_api.TransactionsApi(api_client)
 
                 # budget_id should be available from config entry
                 budget_id = coordinator.config_entry.data.get("ynab_budget_id")
@@ -201,7 +204,8 @@ def async_register_services(hass: HomeAssistant, coordinator):
 
                 _LOGGER.info(f"Creating adjustment transaction for {asset['name']} ({ynab_id}) in budget {budget_id} for amount {adjustment_milliunits}")
                 # Call create_transaction - expects SaveTransactionsWrapper
-                await transactions_api_instance.create_transaction(budget_id, {"transaction": transaction_payload.to_dict()})
+                # Use .to_dict() on the model instance
+                await transactions_api_instance.create_transaction(budget_id, {"transaction": transaction_payload_model.to_dict()})
                 _LOGGER.info(f"Successfully submitted adjustment transaction for asset {asset['name']} to YNAB.")
                 successful_updates += 1
 
@@ -326,9 +330,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 # --- Need to add YNAB client initialization and access --- NEW ---
-from ynab_api import ApiClient, Configuration, AccountsApi
-from ynab_api.api import transactions_api # Import TransactionsApi module
-from ynab_api.model.save_transaction import SaveTransaction # Import SaveTransaction model
+# Corrected import: Import only the base package
+import ynab_api
+# Removed: from ynab_api import ApiClient, Configuration, AccountsApi
+# Removed: from ynab_api.api import transactions_api # Import TransactionsApi module
+# Removed: from ynab_api.model.save_transaction import SaveTransaction # Import SaveTransaction model
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
@@ -388,12 +394,14 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.error("YNAB API key not found in config entry.")
             return None
 
-        configuration = Configuration()
+        # Use ynab_api namespace
+        configuration = ynab_api.Configuration()
         configuration.api_key['Authorization'] = ynab_api_key
         configuration.api_key_prefix['Authorization'] = 'Bearer'
 
         # Return the configured ApiClient instance
-        self._ynab_client = ApiClient(configuration)
+        # Use ynab_api namespace
+        self._ynab_client = ynab_api.ApiClient(configuration)
         _LOGGER.info("YNAB ApiClient initialized.")
         return self._ynab_client
 
