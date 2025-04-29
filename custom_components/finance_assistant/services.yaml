@@ -1,0 +1,3 @@
+update_stock_assets:
+  description: Fetches the current price from linked Home Assistant entities for YNAB stock assets and updates their value in YNAB.
+  fields: {}
