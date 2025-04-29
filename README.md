@@ -1,20 +1,37 @@
-# Finance Assistant Integration
+# devcontainer
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg)](https://github.com/hacs/integration)
+This project contains custom devcontainers for use in our repositories.
 
-Home Assistant integration component for the Finance Assistant addon.
 
-**This integration requires the Finance Assistant Add-on.**
+## Images
 
-Please refer to the [Finance Assistant Addon documentation](https://github.com/chbarnhouse/home-assistant-addons/tree/main/finance_assistant) for setup and usage instructions.
+Image | Description | Dockerfile
+-- | -- | -- 
+`ghcr.io/home-assistant/devcontainer:addons` | For Add-on development | [./addons/Dockerfile](./addons/Dockerfile)
+`ghcr.io/home-assistant/devcontainer:supervisor` | For Supervisor development | [./supervisor/Dockerfile](./supervisor/Dockerfile)
 
-## Installation
+Versioned images are available with the custom devcontainer version prepended (e.g. `1-supervisor`). This loosly resembles what
+upstream devcontainers are providing as well. The version is meant to be incremented when non-backwards compatible changes are
+made. That allows existing devcontainer configuration to work while updating the devcontainers (e.g. when the Supervisor devcontainer
+is updated to a new Python version).
 
-1. Ensure the [Finance Assistant Add-on](https://github.com/chbarnhouse/home-assistant-addons/tree/main/finance_assistant) is installed and configured.
-2. Install this integration via HACS (Home Assistant Community Store).
-3. Add the integration via the Home Assistant UI (Configuration > Devices & Services > Add Integration > Finance Assistant).
+## Example files
 
-## Support
+Example files to use with Visual Studio Code 
 
-For issues with this integration, please report them on the [integrations repository issue tracker](https://github.com/chbarnhouse/home-assistant-integrations/issues).
-For issues with the addon, please report them on the [addons repository issue tracker](https://github.com/chbarnhouse/home-assistant-addons/issues).
+### addon
+
+Example files for the `addons` devcontainer
+
+- [Example configuration (for `.devcontainer/devcontainer.json`)](./addons/devcontainer.json)
+- [Example tasks file (for `.vscode/tasks.json`)](./addons/tasks.json)
+
+
+
+## Notes
+
+### `addons` and `supervisor`
+
+- Use the command `supervisor_run` to start Home Assistant inside the devcontainer, or run the task "Start Home Assistant" if you copied the tasks file.
+- Use `ha` to use the custom Home Assistant CLI (Needs the supervisor to be running).
+
