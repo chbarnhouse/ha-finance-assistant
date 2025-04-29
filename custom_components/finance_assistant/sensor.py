@@ -81,7 +81,6 @@ def _get_device_info(config_entry_id: str, category_key: str, category_name: str
         identifiers={(DOMAIN, f"{config_entry_id}-{category_key}")},
         name=f"Finance Assistant {category_name}",
         manufacturer="Finance Assistant Addon",
-        icon=icon, # Add the determined icon
         via_device=(DOMAIN, config_entry_id) # Link to the main integration config entry device
     )
 
@@ -1271,6 +1270,7 @@ class FinanceAssistantStatusSensor(FinanceAssistantBaseSensor):
     _attr_has_entity_name = True
     _attr_name = "Status"
     _attr_should_poll = False # Data comes from coordinator
+    _attr_device_class = None # Add missing attribute
 
     def __init__(self, coordinator, config_entry_id):
         """Initialize the status sensor."""
