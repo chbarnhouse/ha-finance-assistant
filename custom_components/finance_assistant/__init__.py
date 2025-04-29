@@ -477,6 +477,10 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
                  combined_data["account_types"] = addon_data.get("account_types", [])
                  combined_data["asset_types"] = addon_data.get("asset_types", [])
                  combined_data["liability_types"] = addon_data.get("liability_types", [])
+                 # Add missing assignments for assets, liabilities, credit_cards from addon data
+                 combined_data["assets"] = addon_data.get("assets", [])
+                 combined_data["liabilities"] = addon_data.get("liabilities", [])
+                 combined_data["credit_cards"] = addon_data.get("credit_cards", [])
 
                  # Process manual assets specifically
                  if isinstance(addon_data.get("manual_assets"), list):
