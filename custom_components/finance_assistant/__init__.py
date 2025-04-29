@@ -15,6 +15,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.const import Platform
 from homeassistant.components import persistent_notification
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN
 
@@ -24,6 +25,191 @@ _LOGGER = logging.getLogger(__name__)
 SCAN_INTERVAL = timedelta(minutes=5)
 
 PLATFORMS = [Platform.SENSOR]
+
+# --- Service Handler --- NEW ---
+def async_register_services(hass: HomeAssistant, coordinator):
+    """Register services for the integration."""
+
+    async def async_handle_update_stock_assets(call) -> None:
+        """Handle the service call to update stock assets."""
+        _LOGGER.info("Service finance_assistant.update_stock_assets called.")
+
+        # 1. Fetch all data from the coordinator (which gets it from the addon)
+        if not coordinator.last_update_success or not coordinator.data:
+            _LOGGER.error("Cannot update stock assets: Coordinator data is unavailable or update failed.")
+            persistent_notification.async_create(
+                hass,
+                "Finance Assistant stock update failed: Could not fetch latest data from addon.",
+                title="Finance Assistant Error",
+                notification_id="fa_stock_update_error",
+            )
+            return
+
+        all_data = coordinator.data
+        all_ynab_accounts = all_data.get("accounts", [])
+        manual_assets = all_data.get("manual_assets", {})
+        asset_types = all_data.get("asset_types", [])
+
+        # Find the ID for the "Stocks" asset type
+        stock_type_id = next((t.get("id") for t in asset_types if t.get("name") == "Stocks"), None)
+        if not stock_type_id:
+            _LOGGER.error("Cannot update stock assets: 'Stocks' asset type ID not found in addon data.")
+            persistent_notification.async_create(
+                hass,
+                "Finance Assistant stock update failed: Could not find 'Stocks' asset type.",
+                title="Finance Assistant Error",
+                notification_id="fa_stock_update_error",
+            )
+            return
+
+        _LOGGER.debug(f"Found 'Stocks' asset type ID: {stock_type_id}")
+
+        # 2. Filter YNAB accounts to find eligible stock assets
+        assets_to_update = []
+        for acc in all_ynab_accounts:
+            # Ensure it's a dictionary and not closed/deleted
+            if not isinstance(acc, dict) or acc.get("closed") or acc.get("deleted"):
+                continue
+
+            # Check if it's a known YNAB asset (tracking accounts)
+            # YNAB types: checking, savings, cash, creditCard, lineOfCredit, otherAsset, otherLiability, mortgage, autoLoan, studentLoan, personalLoan
+            # We only care about 'otherAsset' for this purpose, but we filter by manual type ID
+            ynab_account_id = acc.get("id")
+            if not ynab_account_id:
+                continue
+
+            # Get manual details for this asset
+            asset_details = manual_assets.get(ynab_account_id)
+            if not asset_details:
+                continue # No manual details, skip
+
+            # Check if the manual type is Stocks
+            if asset_details.get("type_id") != stock_type_id:
+                continue # Not a stock asset based on manual type
+
+            # Check for entity_id and shares
+            entity_id = asset_details.get("entity_id")
+            shares_str = asset_details.get("shares") # Shares are stored as string in JSON?
+            if not entity_id or not shares_str:
+                _LOGGER.debug(f"Skipping asset {acc.get('name')} ({ynab_account_id}): Missing entity_id or shares in manual details.")
+                continue
+
+            try:
+                shares = float(shares_str)
+                if shares <= 0:
+                    raise ValueError("Shares must be positive")
+            except (ValueError, TypeError):
+                _LOGGER.warning(f"Skipping asset {acc.get('name')} ({ynab_account_id}): Invalid shares value '{shares_str}'.")
+                continue
+
+            # If all checks pass, add to list
+            assets_to_update.append({
+                "ynab_account_id": ynab_account_id,
+                "name": acc.get("name"),
+                "entity_id": entity_id,
+                "shares": shares,
+            })
+
+        _LOGGER.info(f"Found {len(assets_to_update)} stock assets linked to HA entities to update.")
+
+        if not assets_to_update:
+            _LOGGER.info("No eligible stock assets found to update.")
+            return # Nothing more to do
+
+        # 3. Iterate and update each asset
+        successful_updates = 0
+        failed_updates = 0
+        for asset in assets_to_update:
+            _LOGGER.debug(f"Processing asset: {asset['name']}")
+            entity_id = asset["entity_id"]
+            shares = asset["shares"]
+            ynab_id = asset["ynab_account_id"]
+
+            # 4. Get HA entity state
+            entity_state = hass.states.get(entity_id)
+            if not entity_state:
+                _LOGGER.error(f"Failed to update {asset['name']}: Entity {entity_id} not found.")
+                failed_updates += 1
+                continue
+
+            try:
+                current_price = float(entity_state.state)
+            except (ValueError, TypeError):
+                _LOGGER.error(f"Failed to update {asset['name']}: Entity {entity_id} state '{entity_state.state}' is not a valid number.")
+                failed_updates += 1
+                continue
+
+            # 5. Calculate new value
+            new_value_milliunits = int(round(current_price * shares * 1000))
+            _LOGGER.debug(f"Asset: {asset['name']}, Entity: {entity_id}, Price: {current_price}, Shares: {shares}, New Value (milliunits): {new_value_milliunits}")
+
+            # 6. Call YNAB API via coordinator's client
+            try:
+                # We need the YnabClient instance from the coordinator
+                # This might require exposing it or adding a method to the coordinator
+                # For now, let's assume we can access it (will need refinement)
+                # ynab_client = coordinator.ynab_client # Assuming this exists
+
+                # Let's try accessing via hass.data for now, needs adjustment
+                if not hasattr(coordinator, '_get_ynab_client') or not await coordinator._get_ynab_client():
+                     _LOGGER.error(f"Failed to update {asset['name']}: Could not get YNAB client from coordinator.")
+                     failed_updates += 1
+                     continue
+
+                ynab_client = await coordinator._get_ynab_client()
+
+                # YNAB API requires balance in milliunits and current date
+                update_payload = {
+                    "account": {
+                        "balance": new_value_milliunits
+                    }
+                }
+                # The python library uses update_account, takes budget_id, account_id, payload
+                # budget_id should be available from config entry
+                budget_id = coordinator.config_entry.data.get("ynab_budget_id")
+                if not budget_id:
+                    _LOGGER.error(f"Failed to update {asset['name']}: YNAB Budget ID not found in config entry.")
+                    failed_updates += 1
+                    continue
+
+                _LOGGER.info(f"Updating YNAB account {ynab_id} for budget {budget_id} with balance {new_value_milliunits}")
+                # Assuming ynab_client has an update_account method
+                await ynab_client.update_account(budget_id, ynab_id, update_payload)
+                _LOGGER.info(f"Successfully submitted update for asset {asset['name']} to YNAB.")
+                successful_updates += 1
+
+            except Exception as e:
+                _LOGGER.exception(f"Failed to update YNAB for asset {asset['name']} ({ynab_id}): {e}")
+                failed_updates += 1
+
+        # 7. Final Notification
+        if failed_updates > 0:
+            persistent_notification.async_create(
+                hass,
+                f"Finance Assistant stock update completed with {failed_updates} errors and {successful_updates} successes.",
+                title="Finance Assistant Stock Update Issues",
+                notification_id="fa_stock_update_error", # Reuse ID to replace previous error
+            )
+        elif successful_updates > 0:
+            persistent_notification.async_create(
+                hass,
+                f"Finance Assistant successfully updated {successful_updates} stock asset(s) in YNAB.",
+                title="Finance Assistant Stock Update",
+                notification_id="fa_stock_update_success",
+            )
+        else:
+             _LOGGER.info("Stock update service ran, but no assets were updated (either none eligible or all failed).")
+             # Optionally notify that nothing was updated?
+             pass
+
+    # Register the service
+    hass.services.async_register(
+        DOMAIN,
+        "update_stock_assets",
+        async_handle_update_stock_assets,
+    )
+
+# --- END Service Handler --- NEW ---
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -94,16 +280,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Forward the setup to the sensor platform
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # --- Register Services --- NEW ---
+    async_register_services(hass, coordinator)
+    # --- END Register Services --- NEW ---
+
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    # Remove services
+    hass.services.async_remove(DOMAIN, "update_stock_assets") # NEW
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
 
     return unload_ok
+
+# --- Need to add YNAB client initialization and access --- NEW ---
+from ynab_api import ApiClient, Configuration, AccountsApi, YNABAPI
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
@@ -140,6 +336,9 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
 
         _LOGGER.debug(f"Coordinator initialized. Supervisor URL base: {self.supervisor_url}, Direct URL base: {self.direct_url}")
 
+        # Initialize YNAB Client placeholder
+        self._ynab_client = None
+
         # Call super().__init__ AFTER defining attributes used by it
         super().__init__(
             hass,
@@ -149,6 +348,25 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             # config_entry=entry # Pass the config entry here
         )
         self.config_entry = entry # Store config_entry if needed elsewhere
+
+    async def _get_ynab_client(self):
+        """Initializes and returns the YNAB API client if config is valid."""
+        if self._ynab_client:
+            return self._ynab_client
+
+        ynab_api_key = self.config_entry.data.get("ynab_api_key")
+        if not ynab_api_key:
+            _LOGGER.error("YNAB API key not found in config entry.")
+            return None
+
+        configuration = Configuration()
+        configuration.api_key['Authorization'] = ynab_api_key
+        configuration.api_key_prefix['Authorization'] = 'Bearer'
+
+        # Use YNABAPI wrapper which handles rate limiting etc.
+        self._ynab_client = YNABAPI(configuration)
+        _LOGGER.info("YNAB API Client initialized.")
+        return self._ynab_client
 
     async def _request(self, method, endpoint, params=None, data=None, json_data=None):
         """Make an API request, trying the appropriate method based on environment."""
@@ -248,111 +466,62 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
                         response_text = await response.text()
                         _LOGGER.error(f"{secondary_method} API request failed ({response.status}) for {endpoint}. Response: {response_text[:200]}...")
                         # Raise an error indicating the fallback failure, potentially including the original primary error?
-                        # For now, just raise the secondary error.
-                        raise UpdateFailed(f"{secondary_method} API failed ({response.status}): {response_text[:100]}...")
+                        # Re-raising the *last_error* (from primary) might be more informative here
+                        raise last_error or UpdateFailed(f"{secondary_method} API failed ({response.status}): {response_text[:100]}...")
 
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
-                _LOGGER.error(f"{secondary_method} API connection error for {endpoint}: {err}")
-                # Raise error indicating secondary connection failure
-                raise UpdateFailed(f"{secondary_method} API connection error: {err}")
-            except UpdateFailed as err:
-                 _LOGGER.error(f"Secondary API UpdateFailed: {err}")
-                 raise err # Re-raise UpdateFailed from non-200/non-JSON secondary response
+                _LOGGER.error(f"{secondary_method} API connection error for {endpoint}: {err}. Raising original error.")
+                raise last_error or UpdateFailed(f"{secondary_method} API connection error: {err}") # Raise original or new error
             except Exception as err:
-                 _LOGGER.exception(f"Unexpected {secondary_method} API error for {endpoint}: {err}")
-                 # Raise error indicating unexpected secondary failure
-                 raise UpdateFailed(f"Unexpected {secondary_method} API error: {err}")
+                _LOGGER.error(f"Unexpected {secondary_method} API error for {endpoint}: {err}", exc_info=True)
+                raise last_error or UpdateFailed(f"Unexpected {secondary_method} API error: {err}") # Raise original or new error
 
-        # --- 3. Final Outcome ---
+        # If we reached here and last_error still exists, it means primary failed and no secondary was attempted OR secondary also failed
         if last_error:
-             # If we get here, it means Primary failed AND (Secondary doesn't exist OR Secondary also failed)
-             _LOGGER.error(f"API request failed for {endpoint} after all attempts. Last error: {last_error}")
-             raise last_error # Raise the final error (either from Primary or Secondary)
-        else:
-             # This should only happen if Primary succeeded on the first try.
-             # The function should have returned within the first 'try' block.
-             _LOGGER.error(f"Reached unexpected end of _request function for {endpoint} without error but without returning data.")
-             raise UpdateFailed("Unexpected state in API request logic")
+            _LOGGER.error(f"API request failed for {endpoint} after all attempts. Final error: {last_error}")
+            raise last_error
+
+        # If we somehow get here without returning data or raising an error (shouldn't happen)
+        _LOGGER.error(f"API request for {endpoint} finished unexpectedly without result or error.")
+        raise UpdateFailed("API request finished unexpectedly.")
 
     async def verify_connection(self):
-        """Verify connection to the addon API by trying the ping endpoint."""
-        _LOGGER.info("Verifying connection to Finance Assistant API...")
+        """Verify connection to the addon API by trying to ping it."""
+        _LOGGER.info("Verifying connection to Finance Assistant addon API...")
         try:
-            # Use the ROOT '/ping' endpoint for verification now
-            _LOGGER.info(f"Attempting API ping (using root /ping endpoint)...")
-            # Use the _request method, which handles supervisor/direct logic automatically
-            # It needs the relative path (without /api prefix) for the root endpoint
-            # Construct the full URL manually for the root ping, respecting the workaround
-            ping_url_supervisor = f"http://supervisor/addons/{self.addon_slug}/ping"
-            ping_url_direct = f"http://homeassistant:{self.direct_port}/ping" # WORKAROUND URL
-
-            last_error = None
-            # Try Supervisor first
-            try:
-                _LOGGER.debug(f"Trying Supervisor ping: {ping_url_supervisor}")
-                async with self.websession.get(ping_url_supervisor, headers=self.supervisor_headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if 200 <= response.status < 300:
-                        _LOGGER.info("Supervisor ping successful.")
-                        return True
-                    else:
-                        response_text = await response.text()
-                        _LOGGER.info(f"Supervisor ping failed ({response.status}): {response_text[:100]}...")
-                        last_error = UpdateFailed(f"Supervisor ping failed ({response.status})")
-            except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
-                _LOGGER.warning(f"Supervisor ping connection error: {err}")
-                last_error = UpdateFailed(f"Supervisor ping connection error: {err}")
-            except Exception as err:
-                _LOGGER.error(f"Unexpected Supervisor ping error: {err}", exc_info=True)
-                last_error = UpdateFailed(f"Unexpected Supervisor ping error: {err}")
-
-            # Try Direct (Workaround) if Supervisor failed
-            if last_error:
-                try:
-                    _LOGGER.info(f"Supervisor ping failed. Trying Direct (Workaround) ping: {ping_url_direct}")
-                    async with self.websession.get(ping_url_direct, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                        if 200 <= response.status < 300:
-                            _LOGGER.info("Direct (Workaround) ping successful.")
-                            return True
-                        else:
-                            response_text = await response.text()
-                            _LOGGER.error(f"Direct (Workaround) ping failed ({response.status}): {response_text[:100]}...")
-                            raise UpdateFailed(f"Direct (Workaround) ping failed ({response.status})") # Raise error if direct fails
-                except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
-                    _LOGGER.error(f"Direct (Workaround) ping connection error: {err}")
-                    raise UpdateFailed(f"Direct (Workaround) ping connection error: {err}") # Raise error if direct fails
-                except Exception as err:
-                    _LOGGER.error(f"Unexpected Direct (Workaround) ping error: {err}", exc_info=True)
-                    raise UpdateFailed(f"Unexpected Direct (Workaround) ping error: {err}") # Raise error if direct fails
-
-            # If we reach here, both attempts failed
-            _LOGGER.error(f"Finance Assistant API connection verification failed after all attempts. Last Supervisor error: {last_error}")
-            raise ConfigEntryNotReady(f"Finance Assistant API connection failed: {last_error}")
+            # Use the _request method which handles fallback logic
+            await self._request("GET", "/ping")
+            _LOGGER.info("Addon API connection successful.")
         except UpdateFailed as err:
-             _LOGGER.error(f"Finance Assistant API connection verification failed: {err}")
-             raise ConfigEntryNotReady(f"Finance Assistant API connection failed: {err}") from err
+            _LOGGER.error(f"Failed to connect to addon API: {err}")
+            persistent_notification.async_create(
+                self.hass,
+                f"Could not connect to the Finance Assistant addon. Please ensure it is running and configured correctly. Error: {err}",
+                title="Finance Assistant Connection Error",
+                notification_id="fa_connection_error",
+            )
+            raise ConfigEntryNotReady(f"Failed to connect to addon API: {err}") from err
         except Exception as err:
-            _LOGGER.error(f"Unexpected error during Finance Assistant API connection verification: {err}", exc_info=True)
+            _LOGGER.error(f"Unexpected error during connection verification: {err}", exc_info=True)
             raise ConfigEntryNotReady(f"Unexpected error verifying connection: {err}") from err
 
     async def _async_update_data(self):
         """Fetch data from the Finance Assistant addon API."""
-        _LOGGER.debug("Fetching data from Finance Assistant addon")
+        _LOGGER.debug("Fetching all data from addon...")
         try:
-            # Data fetching still uses the /api prefix via the base URLs in _request
-            data = await self._request("GET", "all_data")
-            if not isinstance(data, dict):
-                _LOGGER.error(f"API '/all_data' returned non-dictionary data: {type(data)}")
-                # If Supervisor/Direct failed, _request raises UpdateFailed
-                # This path implies _request returned something unexpected but didn't fail
-                return {} # Return empty dict to prevent component failure
-
-            _LOGGER.debug(f"Data fetched successfully: Keys={list(data.keys())}")
-            # Simplified validation for now
+            # Use the internal request method
+            data = await self._request("GET", "/all_data")
+            _LOGGER.debug("Successfully fetched data from addon.")
             return data
         except UpdateFailed as err:
-            _LOGGER.error(f"Update failed during _async_update_data: {err}")
-            # Don't generate mock data, let HA handle the update failure
-            raise # Re-raise UpdateFailed to HASS
+            _LOGGER.error(f"Error fetching data from Finance Assistant addon: {err}")
+            persistent_notification.async_create(
+                self.hass,
+                f"Could not fetch data from the Finance Assistant addon. Error: {err}",
+                title="Finance Assistant Update Error",
+                notification_id="fa_update_error",
+            )
+            raise # Re-raise the UpdateFailed exception
         except Exception as err:
-            _LOGGER.error(f"Unexpected error updating Finance Assistant data: {err}", exc_info=True)
-            raise UpdateFailed(f"Error communicating with API: {err}") from err
+             _LOGGER.error(f"Unexpected error fetching data: {err}", exc_info=True)
+             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
