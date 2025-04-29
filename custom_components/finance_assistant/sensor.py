@@ -60,16 +60,10 @@ SENSOR_TYPES = {
 # Helper function to generate device info
 def _get_device_info(config_entry_id: str, category_key: str, category_name: str) -> DeviceInfo:
     """Return device information for a specific category."""
-    # REMOVED icon determination logic - let HA handle based on entities
-    # icon = "mdi:finance" # Default
-    # if category_name == "Accounts":
-    #     icon = "mdi:cash-multiple"
-    # ... etc ...
-
     return DeviceInfo(
         identifiers={(DOMAIN, f"{config_entry_id}-{category_key}")},
         name=f"Finance Assistant {category_name}",
-        # icon=icon, # REMOVED - Caused errors
+        manufacturer="Finance Assistant Addon",
         via_device=(DOMAIN, config_entry_id) # Link to the main integration config entry device
     )
 
@@ -89,7 +83,7 @@ async def async_setup_entry(
         identifiers={(DOMAIN, entry.entry_id)},
         name="Finance Assistant", # Name for the main device
         manufacturer="Finance Assistant Addon",
-        model="Addon Integration", # Add model
+        # model="Addon Integration", # Optional: Add model if desired
         # sw_version=coordinator.data.get("addon_version", "Unknown"), # Optional: If addon version is available
     )
     _LOGGER.debug(f"Ensured main device exists for entry ID: {entry.entry_id}")
@@ -244,10 +238,6 @@ async def async_setup_entry(
     else:
         _LOGGER.warning("Coordinator data is not a valid dictionary. Skipping summary sensors.")
 
-    # --- Add a Status Sensor for the main device --- NEW
-    entities.append(FinanceAssistantStatusSensor(coordinator, entry.entry_id))
-    # -----------------------------------------------
-
     _LOGGER.debug(f"Adding {len(entities)} Finance Assistant sensors")
     if entities:
         async_add_entities(entities)
@@ -300,7 +290,7 @@ class FinanceAssistantBaseSensor(CoordinatorEntity):
 # --- Account Sensor (Existing, slightly modified base) ---
 class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant account balance sensor."""
-    _attr_icon = "mdi:bank" # Restore icon
+
     _attr_has_entity_name = True  # Use helper property for name
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
@@ -452,7 +442,7 @@ class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
 
 class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
     """Implementation of a YNAB asset sensor."""
-    _attr_icon = "mdi:chart-bar" # Restore icon
+
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
@@ -598,7 +588,7 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
 # --- Liability Sensor ---
 class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant liability balance sensor."""
-    _attr_icon = "mdi:receipt-text-minus-outline" # Restore icon
+
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
@@ -714,7 +704,7 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
 # --- Credit Card Sensor ---
 class FinanceAssistantCreditCardSensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant credit card balance sensor."""
-    _attr_icon = "mdi:credit-card" # Restore icon
+
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
@@ -1255,40 +1245,3 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
         return True
 
     # No extra_state_attributes needed for simple summary sensors for now
-
-# --- Status Sensor for Main Device --- NEW CLASS
-class FinanceAssistantStatusSensor(FinanceAssistantBaseSensor):
-    """A simple status sensor for the main integration device."""
-    _attr_icon = "mdi:finance" # Restore icon
-    _attr_has_entity_name = True
-    _attr_name = "Status"
-    _attr_should_poll = False # Data comes from coordinator
-    _attr_device_class = None # Add missing attribute
-
-    def __init__(self, coordinator, config_entry_id):
-        """Initialize the status sensor."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{config_entry_id}_status"
-        # Link this entity directly to the main device
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, config_entry_id)}
-            # No via_device here, this *is* the main device's entity
-        )
-
-    @property
-    def state(self):
-        """Return the state (e.g., online/connected)."""
-        # Check if the coordinator successfully updated
-        if self.coordinator.last_update_success:
-            return "Connected"
-        else:
-            return "Error"
-
-    @property
-    def available(self) -> bool:
-        """Entity is always available once coordinator is created."""
-        # This sensor's availability reflects the coordinator's ability to connect,
-        # which is implicitly handled by its state ('Connected'/'Error')
-        return True
-
-    # No _handle_coordinator_update needed if state depends only on last_update_success
