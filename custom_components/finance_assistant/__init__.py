@@ -295,8 +295,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 # --- Need to add YNAB client initialization and access --- NEW ---
-from ynab_api import ApiClient, Configuration
-from ynab_api.api import AccountsApi # Import specific API class
+from ynab_api import ApiClient, Configuration, AccountsApi
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
