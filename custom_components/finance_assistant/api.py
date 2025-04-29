@@ -149,7 +149,7 @@ class FinanceAssistantApiClient:
 
     async def async_get_all_data(self) -> dict:
         """Fetch all combined data from the addon."""
-        return await self._request("GET", "/api/all_data")
+        return await self._request("GET", "/all_data")
 
     # Add more methods as needed, e.g.:
     # async def async_get_accounts(self) -> list:
