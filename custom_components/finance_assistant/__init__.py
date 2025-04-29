@@ -542,23 +542,104 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.error(f"Unexpected error during connection verification: {err}", exc_info=True)
             raise ConfigEntryNotReady(f"Unexpected error verifying connection: {err}") from err
 
-    async def _async_update_data(self):
-        """Fetch data from the Finance Assistant addon API."""
-        _LOGGER.debug("Fetching all data from addon...")
+    async def _async_update_data(self) -> dict:
+        """Fetch data from API endpoint and YNAB.
+
+        This is the place to fetch data from your API endpoint,
+        or correlate data from multiple sources (e.g. YNAB and local addon data).
+        """
+        _LOGGER.debug("COORDINATOR: Starting data update...") # Log start
         try:
-            # Use the internal request method
-            data = await self._request("GET", "/all_data")
-            _LOGGER.debug("Successfully fetched data from addon.")
-            return data
-        except UpdateFailed as err:
-            _LOGGER.error(f"Error fetching data from Finance Assistant addon: {err}")
-            persistent_notification.async_create(
-                self.hass,
-                f"Could not fetch data from the Finance Assistant addon. Error: {err}",
-                title="Finance Assistant Update Error",
-                notification_id="fa_update_error",
-            )
-            raise # Re-raise the UpdateFailed exception
-        except Exception as err:
-             _LOGGER.error(f"Unexpected error fetching data: {err}", exc_info=True)
-             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
+            # Attempt to fetch data from the addon's API first
+            # Initialize data structure
+            combined_data = {
+                "accounts": [],
+                "assets": [],
+                "liabilities": [],
+                "credit_cards": [],
+                "manual_assets": {}, # Store manual asset details keyed by YNAB ID
+                "ynab_accounts": [] # Keep raw YNAB accounts separate initially
+            }
+
+            _LOGGER.debug("COORDINATOR: Fetching data from addon API...")
+            addon_data = await self.api.async_get_all_data()
+            _LOGGER.debug(f"COORDINATOR: Received addon data: {addon_data}")
+
+            # Process manual assets from addon data
+            if addon_data and isinstance(addon_data.get("manual_assets"), list):
+                for asset_detail in addon_data["manual_assets"]:
+                    # Use ynab_id as the key if available
+                    if asset_detail and isinstance(asset_detail, dict) and asset_detail.get("ynab_id"):
+                        combined_data["manual_assets"][asset_detail["ynab_id"]] = asset_detail
+                    else:
+                        _LOGGER.warning(f"COORDINATOR: Skipping manual asset detail due to missing ynab_id: {asset_detail}")
+            else:
+                 _LOGGER.debug("COORDINATOR: No valid manual_assets found in addon data.")
+
+            # Fetch data from YNAB if API key is configured
+            ynab_api_key = self.config_entry.data.get("ynab_api_key")
+            ynab_budget_id = self.config_entry.data.get("ynab_budget_id")
+
+            if ynab_api_key and ynab_budget_id:
+                _LOGGER.debug("COORDINATOR: YNAB key and budget found, fetching YNAB accounts...")
+                ynab_client = await self._get_ynab_client()
+                if ynab_client:
+                    accounts_api = ynab_api.AccountsApi(ynab_client)
+                    try:
+                        # Note: get_accounts may need error handling if budget_id is invalid
+                        api_response = await self.hass.async_add_executor_job(
+                            accounts_api.get_accounts, ynab_budget_id
+                        )
+                        _LOGGER.debug(f"COORDINATOR: YNAB API response received.") # Add log here
+                        if hasattr(api_response, 'data') and hasattr(api_response.data, 'accounts'):
+                            combined_data["ynab_accounts"] = [
+                                account.to_dict()
+                                for account in api_response.data.accounts
+                                if not account.closed # Exclude closed accounts
+                            ]
+                            _LOGGER.debug(f"COORDINATOR: Processed {len(combined_data['ynab_accounts'])} open YNAB accounts.")
+                            # TODO: Merge/correlate YNAB accounts with addon data if needed
+                            # For now, just use YNAB accounts directly as assets/liabilities etc.
+                            # Separate YNAB accounts into assets/liabilities based on type?
+                            # YNAB Types: checking, savings, creditCard, cash, lineOfCredit, otherAsset, otherLiability, mortgage, autoLoan, studentLoan, personalLoan
+                            for acc in combined_data["ynab_accounts"]:
+                                if acc.get('type') in ['checking', 'savings', 'cash', 'otherAsset']:
+                                    combined_data["assets"].append(acc)
+                                elif acc.get('type') in ['creditCard', 'lineOfCredit', 'otherLiability', 'mortgage', 'autoLoan', 'studentLoan', 'personalLoan']:
+                                    # Maybe separate credit cards?
+                                    if acc.get('type') == 'creditCard':
+                                        combined_data["credit_cards"].append(acc)
+                                    else:
+                                        combined_data["liabilities"].append(acc)
+                                else:
+                                     _LOGGER.warning(f"COORDINATOR: Unhandled YNAB account type: {acc.get('type')} for account {acc.get('name')}")
+
+                        else:
+                            _LOGGER.error("COORDINATOR: Invalid YNAB API response structure.")
+                    except ApiException as e:
+                        _LOGGER.error(f"COORDINATOR: Exception when calling YNAB AccountsApi->get_accounts: {e}")
+                    except Exception as e:
+                        _LOGGER.error(f"COORDINATOR: Unexpected error fetching YNAB accounts: {e}")
+                else:
+                    _LOGGER.warning("COORDINATOR: Failed to initialize YNAB client.")
+            else:
+                _LOGGER.debug("COORDINATOR: YNAB API key or budget ID not configured. Skipping YNAB fetch.")
+
+            # TODO: Add fetching logic for other addon data types (accounts, liabilities, credit cards) if needed
+            # For now, focus on merging manual asset details with YNAB asset data
+
+            _LOGGER.debug(f"COORDINATOR: Final combined data before return: {combined_data}")
+            return combined_data
+
+        except FinanceAssistantApiClientAuthenticationError as exception:
+            _LOGGER.error("COORDINATOR: Addon authentication error.")
+            raise UpdateFailed("Addon authentication error") from exception
+        except FinanceAssistantApiClientError as exception:
+            _LOGGER.error(f"COORDINATOR: Addon API communication error: {exception}")
+            raise UpdateFailed("Addon API communication error") from exception
+        except Exception as exception:
+            _LOGGER.error(f"COORDINATOR: Unexpected error during data update: {exception}")
+            # Log traceback for unexpected errors
+            import traceback
+            _LOGGER.error(traceback.format_exc())
+            raise UpdateFailed("Unexpected error during data update") from exception
