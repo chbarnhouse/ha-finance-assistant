@@ -1,7 +1,7 @@
 """The Finance Assistant integration."""
 import asyncio
 import logging
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, date
 import os
 import socket
 import json
@@ -143,42 +143,73 @@ def async_register_services(hass: HomeAssistant, coordinator):
             new_value_milliunits = int(round(current_price * shares * 1000))
             _LOGGER.debug(f"Asset: {asset['name']}, Entity: {entity_id}, Price: {current_price}, Shares: {shares}, New Value (milliunits): {new_value_milliunits}")
 
-            # 6. Call YNAB API via coordinator's client
+            # 6. Fetch current balance and calculate adjustment
+            current_ynab_balance_milliunits = None
+            account_data = next((acc for acc in all_ynab_accounts if acc.get("id") == ynab_id), None)
+            if account_data and isinstance(account_data.get("balance"), int):
+                current_ynab_balance_milliunits = account_data["balance"]
+            else:
+                _LOGGER.warning(f"Could not find current balance for YNAB account {asset['name']} ({ynab_id}). Skipping adjustment.")
+                failed_updates += 1
+                continue
+
+            adjustment_milliunits = new_value_milliunits - current_ynab_balance_milliunits
+
+            # Skip if difference is zero (or very small to avoid noise)
+            if abs(adjustment_milliunits) < 10: # Less than 1 cent difference
+                _LOGGER.info(f"Skipping adjustment for {asset['name']}: Calculated value matches YNAB balance.")
+                # Consider this a success? Or just skip?
+                continue
+
+            # 7. Construct Adjustment Transaction
+            today_date = date.today().isoformat()
+            # Create a unique import ID: fa-adj-<accountId>-<date>
+            import_id = f"fa-adj-{ynab_id}-{today_date}"
+            # Limit import_id to 36 chars as per YNAB API spec
+            if len(import_id) > 36:
+                import_id = import_id[:36]
+
+            transaction_payload = SaveTransaction(
+                account_id=ynab_id,
+                date=today_date,
+                amount=adjustment_milliunits,
+                payee_name="Market Adjustment", # Or "Stock Value Update"
+                cleared="cleared",
+                approved=True,
+                memo=f"HA Update: {shares} shares @ ${current_price:.2f} = ${new_value_milliunits/1000:.2f}",
+                import_id=import_id
+            )
+
+            # 8. Call YNAB API to create transaction
             try:
                 # Get the ApiClient from the coordinator
                 api_client = await coordinator._get_ynab_client()
                 if not api_client:
-                     _LOGGER.error(f"Failed to update {asset['name']}: Could not get YNAB ApiClient from coordinator.")
+                     _LOGGER.error(f"Failed to create adjustment for {asset['name']}: Could not get YNAB ApiClient.")
                      failed_updates += 1
                      continue
 
-                # Instantiate the AccountsApi class from the imported module
-                accounts_api_instance = accounts_api.AccountsApi(api_client)
+                # Instantiate the TransactionsApi
+                transactions_api_instance = transactions_api.TransactionsApi(api_client)
 
-                # YNAB API requires balance in milliunits and current date
-                update_payload = {
-                    "account": {
-                        "balance": new_value_milliunits
-                    }
-                }
                 # budget_id should be available from config entry
                 budget_id = coordinator.config_entry.data.get("ynab_budget_id")
                 if not budget_id:
-                    _LOGGER.error(f"Failed to update {asset['name']}: YNAB Budget ID not found in config entry.")
+                    _LOGGER.error(f"Failed to create adjustment for {asset['name']}: YNAB Budget ID not found.")
                     failed_updates += 1
                     continue
 
-                _LOGGER.info(f"Updating YNAB account {ynab_id} for budget {budget_id} with balance {new_value_milliunits}")
-                # Call update_account on the AccountsApi instance
-                await accounts_api_instance.update_account(budget_id, ynab_id, update_payload)
-                _LOGGER.info(f"Successfully submitted update for asset {asset['name']} to YNAB.")
+                _LOGGER.info(f"Creating adjustment transaction for {asset['name']} ({ynab_id}) in budget {budget_id} for amount {adjustment_milliunits}")
+                # Call create_transaction - expects SaveTransactionsWrapper
+                await transactions_api_instance.create_transaction(budget_id, {"transaction": transaction_payload.to_dict()})
+                _LOGGER.info(f"Successfully submitted adjustment transaction for asset {asset['name']} to YNAB.")
                 successful_updates += 1
 
             except Exception as e:
-                _LOGGER.exception(f"Failed to update YNAB for asset {asset['name']} ({ynab_id}): {e}")
+                _LOGGER.exception(f"Failed to create adjustment transaction for {asset['name']} ({ynab_id}): {e}")
                 failed_updates += 1
 
-        # 7. Final Notification
+        # 9. Final Notification
         if failed_updates > 0:
             persistent_notification.async_create(
                 hass,
@@ -295,8 +326,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 # --- Need to add YNAB client initialization and access --- NEW ---
-from ynab_api import ApiClient, Configuration
-from ynab_api.api import accounts_api # Import the module
+from ynab_api import ApiClient, Configuration, AccountsApi
+from ynab_api.api import transactions_api # Import TransactionsApi module
+from ynab_api.model.save_transaction import SaveTransaction # Import SaveTransaction model
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
