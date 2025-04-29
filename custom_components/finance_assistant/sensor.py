@@ -477,6 +477,15 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
         self._original_name = asset_name
         self._last_asset_data = None
 
+        # Attributes to store detailed info
+        self._asset_data = None
+        self._manual_details = None # To store details from manual_assets.json
+        self._attr_extra_state_attributes = {}
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{asset_id}"
+        self._attr_device_info = device_info # Set device info
+        self._attr_has_entity_name = True
+        self._attr_name = asset_name
+
         _LOGGER.debug(f"AssetSensor initialized: ID={asset_id}, Name={asset_name}")
 
     async def async_added_to_hass(self) -> None:
@@ -570,19 +579,58 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        if not self.coordinator.data or "assets" not in self.coordinator.data:
-            return
+        if self.coordinator.data and isinstance(self.coordinator.data, dict):
+            # Find the specific asset data using the asset_id
+            assets_list = self.coordinator.data.get("assets", [])
+            self._asset_data = self._find_data_by_id(assets_list, self._asset_id)
 
-        assets_list = self.coordinator.data.get("assets", [])
-        if not isinstance(assets_list, list):
-            _LOGGER.warning(f"'assets' in coordinator data is not a list (Type: {type(assets_list)}). Cannot update asset sensor.")
-            return
+            # Find the manual details for this asset
+            manual_assets_dict = self.coordinator.data.get("manual_assets", {})
+            self._manual_details = manual_assets_dict.get(self._asset_id)
 
-        asset_data = next((asset for asset in assets_list if asset.get('id') == self._asset_id), None)
+            if self._asset_data:
+                self._update_internal_state(self._asset_data.get("name", "Unknown Asset"))
+                self._attr_available = True
 
-        if asset_data:
-            self._update_internal_state(asset_data.get('name', 'Unknown Asset'))
-            self.async_write_ha_state()
+                # --- Add Calculated Value Logic --- NEW ---
+                linked_entity_id = self._manual_details.get("entity_id") if self._manual_details else None
+                shares_str = self._manual_details.get("shares") if self._manual_details else None
+                shares = None
+                calculated_value = None
+
+                self._attr_extra_state_attributes["linked_entity_id"] = linked_entity_id
+                self._attr_extra_state_attributes["shares"] = shares_str # Store the raw value from config
+
+                if linked_entity_id and shares_str:
+                    try:
+                        shares = float(shares_str)
+                        if shares <= 0:
+                            raise ValueError("Shares must be positive")
+
+                        entity_state = self.hass.states.get(linked_entity_id)
+                        if entity_state is None:
+                            _LOGGER.warning(f"Entity {linked_entity_id} not found for asset {self.name}")
+                            calculated_value = "Entity not found"
+                        else:
+                            try:
+                                current_price = float(entity_state.state)
+                                calculated_value = round(current_price * shares, 2)
+                            except (ValueError, TypeError):
+                                _LOGGER.warning(f"Entity {linked_entity_id} state '{entity_state.state}' is not a valid number for asset {self.name}")
+                                calculated_value = "Invalid Price State"
+
+                    except (ValueError, TypeError) as e:
+                        _LOGGER.warning(f"Invalid shares value '{shares_str}' for asset {self.name}: {e}")
+                        calculated_value = "Invalid Shares"
+                    except Exception as e:
+                         _LOGGER.error(f"Unexpected error calculating value for asset {self.name}: {e}")
+                         calculated_value = "Calculation Error"
+
+                self._attr_extra_state_attributes["calculated_value"] = calculated_value
+                # --- End Calculated Value Logic ---
+
+                self.async_write_ha_state()
+                return # Added return to exit if data processed
 
 
 # --- Liability Sensor ---
