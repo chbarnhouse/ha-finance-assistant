@@ -60,10 +60,28 @@ SENSOR_TYPES = {
 # Helper function to generate device info
 def _get_device_info(config_entry_id: str, category_key: str, category_name: str) -> DeviceInfo:
     """Return device information for a specific category."""
+    # Determine icon based on category
+    icon = "mdi:finance" # Default
+    if category_name == "Accounts":
+        icon = "mdi:cash-multiple"
+    elif category_name == "Assets":
+        icon = "mdi:chart-line"
+    elif category_name == "Liabilities":
+        icon = "mdi:hand-coin-outline"
+    elif category_name == "Credit Cards":
+        icon = "mdi:credit-card"
+    elif category_name == "Transaction Summary":
+        icon = "mdi:swap-horizontal"
+    elif category_name == "YNAB Summary":
+        icon = "mdi:information-outline"
+    elif category_name == "Analytics":
+        icon = "mdi:chart-pie"
+
     return DeviceInfo(
         identifiers={(DOMAIN, f"{config_entry_id}-{category_key}")},
         name=f"Finance Assistant {category_name}",
         manufacturer="Finance Assistant Addon",
+        icon=icon, # Add the determined icon
         via_device=(DOMAIN, config_entry_id) # Link to the main integration config entry device
     )
 
@@ -290,6 +308,7 @@ class FinanceAssistantBaseSensor(CoordinatorEntity):
 # --- Account Sensor (Existing, slightly modified base) ---
 class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant account balance sensor."""
+    _attr_icon = "mdi:bank" # Default icon for accounts
 
     _attr_has_entity_name = True  # Use helper property for name
     _attr_device_class = SensorDeviceClass.MONETARY
@@ -442,6 +461,7 @@ class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
 
 class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
     """Implementation of a YNAB asset sensor."""
+    _attr_icon = "mdi:chart-bar" # Default icon for assets
 
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
@@ -588,6 +608,7 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
 # --- Liability Sensor ---
 class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant liability balance sensor."""
+    _attr_icon = "mdi:receipt-text-minus-outline" # Default icon for liabilities
 
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
@@ -704,6 +725,7 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
 # --- Credit Card Sensor ---
 class FinanceAssistantCreditCardSensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant credit card balance sensor."""
+    _attr_icon = "mdi:credit-card" # Default icon for credit cards
 
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
