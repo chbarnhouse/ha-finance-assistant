@@ -300,6 +300,7 @@ class FinanceAssistantBaseSensor(CoordinatorEntity):
 # --- Account Sensor (Existing, slightly modified base) ---
 class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant account balance sensor."""
+    _attr_icon = "mdi:bank" # Restore icon
     _attr_has_entity_name = True  # Use helper property for name
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
@@ -451,6 +452,7 @@ class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
 
 class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
     """Implementation of a YNAB asset sensor."""
+    _attr_icon = "mdi:chart-bar" # Restore icon
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
@@ -596,6 +598,7 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
 # --- Liability Sensor ---
 class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant liability balance sensor."""
+    _attr_icon = "mdi:receipt-text-minus-outline" # Restore icon
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
@@ -711,6 +714,7 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
 # --- Credit Card Sensor ---
 class FinanceAssistantCreditCardSensor(FinanceAssistantBaseSensor):
     """Representation of a Finance Assistant credit card balance sensor."""
+    _attr_icon = "mdi:credit-card" # Restore icon
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_state_class = SensorStateClass.TOTAL
