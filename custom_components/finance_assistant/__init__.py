@@ -18,6 +18,13 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN
+# Import the API client and exceptions
+from .api import (
+    FinanceAssistantApiClient,
+    FinanceAssistantApiClientAuthenticationError,
+    FinanceAssistantApiClientError,
+    ApiException,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -374,13 +381,22 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         # Initialize YNAB Client placeholder
         self._ynab_client = None
 
+        # Instantiate the API client object and assign to self.api
+        self.api = FinanceAssistantApiClient(
+            session=self.websession,
+            supervisor_url=self.supervisor_url,
+            direct_url=self.direct_url,
+            supervisor_token=self.supervisor_token
+        )
+
+        _LOGGER.debug("Coordinator initialized. API client created.")
+
         # Call super().__init__ AFTER defining attributes used by it
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             update_interval=SCAN_INTERVAL,
-            # config_entry=entry # Pass the config entry here
         )
         self.config_entry = entry # Store config_entry if needed elsewhere
 
@@ -405,131 +421,14 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.info("YNAB ApiClient initialized.")
         return self._ynab_client
 
-    async def _request(self, method, endpoint, params=None, data=None, json_data=None):
-        """Make an API request, trying the appropriate method based on environment."""
-        headers = {}
-        last_error = None
-        endpoint_clean = endpoint.lstrip('/')
-
-        # Determine primary and secondary URLs/methods based on environment
-        primary_url = None
-        secondary_url = None
-        primary_method = "Unknown"
-        secondary_method = "Unknown"
-
-        if self.supervisor_token:
-            # Production/Supervisor: Try Supervisor first, fallback to Direct (slug)
-            primary_url = f"{self.supervisor_url}/{endpoint_clean}"
-            primary_method = "Supervisor"
-            secondary_url = f"{self.direct_url}/{endpoint_clean}" # Uses slug hostname here
-            secondary_method = "Direct (via slug)"
-            headers = {"Authorization": f"Bearer {self.supervisor_token}"}
-            _LOGGER.debug(f"Supervisor env detected. Primary: {primary_method}, Secondary: {secondary_method}")
-        else:
-            # Dev environment: Prioritize Direct (host.docker.internal)
-            primary_url = f"{self.direct_url}/{endpoint_clean}" # Uses host.docker.internal here
-            primary_method = "Direct (via host.docker.internal)"
-            # No Supervisor fallback possible without token
-            secondary_url = None
-            secondary_method = "None"
-            _LOGGER.debug(f"Dev env detected. Primary: {primary_method}, No Secondary.")
-
-        # --- 1. Try Primary Method ---
-        if primary_url:
-            _LOGGER.debug(f"Attempting {primary_method} API request to: {primary_url}")
-            primary_headers = headers.copy() # Use appropriate headers for primary
-            try:
-                async with self.websession.request(
-                    method, primary_url, headers=primary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if 200 <= response.status < 300:
-                        _LOGGER.debug(f"{primary_method} API success ({response.status}) for {endpoint}")
-                        try:
-                            if response.status == 204: return {} # Handle No Content
-                            return await response.json()
-                        except (aiohttp.ContentTypeError, json.JSONDecodeError) as json_err:
-                            content_text = await response.text()
-                            _LOGGER.error(f"{primary_method} API returned non-JSON (status {response.status}): {json_err}. Content: {content_text[:100]}...")
-                            last_error = UpdateFailed(f"{primary_method} API returned non-JSON: {content_text[:100]}...")
-                        except Exception as err:
-                            _LOGGER.error(f"Unexpected {primary_method} API error for {endpoint}: {err}", exc_info=True)
-                            last_error = UpdateFailed(f"Unexpected {primary_method} API error: {err}")
-                    # --- Handle specific non-success codes before fallback ---
-                    elif response.status == 404:
-                         # Downgrade 404 from warning to info, as fallback is expected sometimes
-                         _LOGGER.info(f"{primary_method} API 404 for {endpoint}. Check slug/endpoint/token. Falling back if possible.")
-                         last_error = UpdateFailed(f"{primary_method} API 404 for {endpoint}")
-                    elif response.status == 401:
-                         _LOGGER.warning(f"{primary_method} API 401 for {endpoint}. Check token. Falling back if possible.")
-                         last_error = UpdateFailed(f"{primary_method} API 401 for {endpoint}")
-                    else:
-                        response_text = await response.text()
-                        _LOGGER.warning(f"{primary_method} API failed ({response.status}) for {endpoint}. Response: {response_text[:200]}... Falling back if possible.")
-                        last_error = UpdateFailed(f"{primary_method} API failed ({response.status}): {response_text[:100]}...")
-
-            except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
-                _LOGGER.warning(f"{primary_method} API connection error for {endpoint}: {err}. Falling back if possible.")
-                last_error = UpdateFailed(f"{primary_method} API connection error: {err}")
-            except Exception as err:
-                 _LOGGER.error(f"Unexpected {primary_method} API error for {endpoint}: {err}", exc_info=True)
-                 last_error = UpdateFailed(f"Unexpected {primary_method} API error: {err}")
-        else:
-             # Should not happen if logic above is correct, but good to handle
-             _LOGGER.error("Primary URL was not determined. Cannot make request.")
-             raise UpdateFailed("Internal configuration error: Primary URL not set.")
-
-        # --- 2. Try Secondary Method (if Primary failed and Secondary exists) ---
-        if last_error and secondary_url:
-            _LOGGER.info(f"Primary method failed ({last_error}). Attempting {secondary_method} API fallback to: {secondary_url}")
-            secondary_headers = {} # Direct fallback doesn't use Supervisor token
-            try:
-                async with self.websession.request(
-                    method, secondary_url, headers=secondary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=15)
-                ) as response:
-                    if 200 <= response.status < 300:
-                        _LOGGER.info(f"{secondary_method} API success ({response.status}) for {endpoint}") # Log fallback success as info
-                        # Fallback succeeded, clear the error and return data
-                        last_error = None
-                        try:
-                             if response.status == 204: return {} # Handle No Content
-                             return await response.json()
-                        except (aiohttp.ContentTypeError, json.JSONDecodeError) as json_err:
-                            content_text = await response.text()
-                            _LOGGER.error(f"{secondary_method} API returned non-JSON (status {response.status}): {json_err}. Content: {content_text[:100]}...")
-                            # Even though fallback connection worked, data is bad, raise UpdateFailed
-                            raise UpdateFailed(f"{secondary_method} API returned non-JSON: {content_text[:100]}...")
-                    else:
-                        # Fallback attempt also failed
-                        response_text = await response.text()
-                        _LOGGER.error(f"{secondary_method} API request failed ({response.status}) for {endpoint}. Response: {response_text[:200]}...")
-                        # Raise an error indicating the fallback failure, potentially including the original primary error?
-                        # Re-raising the *last_error* (from primary) might be more informative here
-                        raise last_error or UpdateFailed(f"{secondary_method} API failed ({response.status}): {response_text[:100]}...")
-
-            except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
-                _LOGGER.error(f"{secondary_method} API connection error for {endpoint}: {err}. Raising original error.")
-                raise last_error or UpdateFailed(f"{secondary_method} API connection error: {err}") # Raise original or new error
-            except Exception as err:
-                _LOGGER.error(f"Unexpected {secondary_method} API error for {endpoint}: {err}", exc_info=True)
-                raise last_error or UpdateFailed(f"Unexpected {secondary_method} API error: {err}") # Raise original or new error
-
-        # If we reached here and last_error still exists, it means primary failed and no secondary was attempted OR secondary also failed
-        if last_error:
-            _LOGGER.error(f"API request failed for {endpoint} after all attempts. Final error: {last_error}")
-            raise last_error
-
-        # If we somehow get here without returning data or raising an error (shouldn't happen)
-        _LOGGER.error(f"API request for {endpoint} finished unexpectedly without result or error.")
-        raise UpdateFailed("API request finished unexpectedly.")
-
     async def verify_connection(self):
         """Verify connection to the addon API by trying to ping it."""
-        _LOGGER.info("Verifying connection to Finance Assistant addon API...")
+        _LOGGER.info("Verifying connection to Finance Assistant addon API (via API client)...")
         try:
-            # Use the _request method which handles fallback logic
-            await self._request("GET", "/ping")
-            _LOGGER.info("Addon API connection successful.")
-        except UpdateFailed as err:
+            # Use the API client's request method for ping
+            await self.api.async_ping()
+            _LOGGER.info("Addon API connection successful (via API client).")
+        except (FinanceAssistantApiClientError, FinanceAssistantApiClientAuthenticationError) as err:
             _LOGGER.error(f"Failed to connect to addon API: {err}")
             persistent_notification.async_create(
                 self.hass,
@@ -558,23 +457,38 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
                 "liabilities": [],
                 "credit_cards": [],
                 "manual_assets": {}, # Store manual asset details keyed by YNAB ID
-                "ynab_accounts": [] # Keep raw YNAB accounts separate initially
+                "ynab_accounts": [], # Keep raw YNAB accounts separate initially
+                "banks": [], # Add banks list
+                "account_types": [], # Add account_types list
+                "asset_types": [], # Add asset_types list
+                "liability_types": [] # Add liability_types list
             }
 
-            _LOGGER.debug("COORDINATOR: Fetching data from addon API...")
+            _LOGGER.debug("COORDINATOR: Fetching data from addon API via client...")
+            # Use the API client instance (self.api)
             addon_data = await self.api.async_get_all_data()
             _LOGGER.debug(f"COORDINATOR: Received addon data: {addon_data}")
 
-            # Process manual assets from addon data
-            if addon_data and isinstance(addon_data.get("manual_assets"), list):
-                for asset_detail in addon_data["manual_assets"]:
-                    # Use ynab_id as the key if available
-                    if asset_detail and isinstance(asset_detail, dict) and asset_detail.get("ynab_id"):
-                        combined_data["manual_assets"][asset_detail["ynab_id"]] = asset_detail
-                    else:
-                        _LOGGER.warning(f"COORDINATOR: Skipping manual asset detail due to missing ynab_id: {asset_detail}")
+            # Process data from addon
+            if addon_data:
+                 # Extract different data types, handling potential missing keys gracefully
+                 combined_data["accounts"] = addon_data.get("accounts", [])
+                 combined_data["banks"] = addon_data.get("banks", [])
+                 combined_data["account_types"] = addon_data.get("account_types", [])
+                 combined_data["asset_types"] = addon_data.get("asset_types", [])
+                 combined_data["liability_types"] = addon_data.get("liability_types", [])
+
+                 # Process manual assets specifically
+                 if isinstance(addon_data.get("manual_assets"), list):
+                     for asset_detail in addon_data["manual_assets"]:
+                         if asset_detail and isinstance(asset_detail, dict) and asset_detail.get("ynab_id"):
+                             combined_data["manual_assets"][asset_detail["ynab_id"]] = asset_detail
+                         else:
+                             _LOGGER.warning(f"COORDINATOR: Skipping manual asset detail due to missing ynab_id: {asset_detail}")
+                 else:
+                     _LOGGER.debug("COORDINATOR: No valid manual_assets list found in addon data.")
             else:
-                 _LOGGER.debug("COORDINATOR: No valid manual_assets found in addon data.")
+                _LOGGER.warning("COORDINATOR: No data received from addon API.")
 
             # Fetch data from YNAB if API key is configured
             ynab_api_key = self.config_entry.data.get("ynab_api_key")
@@ -602,6 +516,12 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
                             # For now, just use YNAB accounts directly as assets/liabilities etc.
                             # Separate YNAB accounts into assets/liabilities based on type?
                             # YNAB Types: checking, savings, creditCard, cash, lineOfCredit, otherAsset, otherLiability, mortgage, autoLoan, studentLoan, personalLoan
+
+                            # Clear existing assets/liabilities before populating from YNAB
+                            combined_data["assets"] = []
+                            combined_data["liabilities"] = []
+                            combined_data["credit_cards"] = []
+
                             for acc in combined_data["ynab_accounts"]:
                                 if acc.get('type') in ['checking', 'savings', 'cash', 'otherAsset']:
                                     combined_data["assets"].append(acc)
@@ -631,6 +551,7 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(f"COORDINATOR: Final combined data before return: {combined_data}")
             return combined_data
 
+        # Use the imported exception classes
         except FinanceAssistantApiClientAuthenticationError as exception:
             _LOGGER.error("COORDINATOR: Addon authentication error.")
             raise UpdateFailed("Addon authentication error") from exception
