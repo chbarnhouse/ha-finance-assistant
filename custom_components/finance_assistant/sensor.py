@@ -579,29 +579,42 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
+        _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: Handling coordinator update.") # Log start
         if self.coordinator.data and isinstance(self.coordinator.data, dict):
             # Find the specific asset data using the asset_id
             assets_list = self.coordinator.data.get("assets", [])
-            self._asset_data = self._find_data_by_id(assets_list, self._asset_id)
+            self._asset_data = self._find_data_by_id(assets_list, self._asset_id) # Finds YNAB asset data
 
             # Find the manual details for this asset
             manual_assets_dict = self.coordinator.data.get("manual_assets", {})
-            self._manual_details = manual_assets_dict.get(self._asset_id)
+            _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: Full manual_assets data: {manual_assets_dict}") # Log full dict
+            self._manual_details = manual_assets_dict.get(self._asset_id) # Finds manual details dict
+            _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: Found manual_details: {self._manual_details}") # Log found details
 
             if self._asset_data:
-                self._update_internal_state(self._asset_data.get("name", "Unknown Asset"))
+                self._update_internal_state(self._asset_data.get("name", "Unknown Asset")) # Updates sensor name and other base attributes
                 self._attr_available = True
 
                 # --- Add Calculated Value Logic --- NEW ---
-                linked_entity_id = self._manual_details.get("entity_id") if self._manual_details else None
-                shares_str = self._manual_details.get("shares") if self._manual_details else None
+                linked_entity_id = None
                 shares = None
+                shares_str = None
                 calculated_value = None
 
-                self._attr_extra_state_attributes["linked_entity_id"] = linked_entity_id
-                self._attr_extra_state_attributes["shares"] = shares_str # Store the raw value from config
+                # Retrieve data from manual_details
+                if self._manual_details: # Check if manual details exist
+                    linked_entity_id = self._manual_details.get("entity_id")
+                    shares_str = self._manual_details.get("shares") # Shares might be string or number
+                    _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: Extracted entity_id='{linked_entity_id}', shares_str='{shares_str}'") # Log extracted values
+                else:
+                    _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: No manual details found in dict for this ID.")
 
-                if linked_entity_id and shares_str:
+                # Store raw values first (even if None)
+                self._attr_extra_state_attributes["linked_entity_id"] = linked_entity_id
+                self._attr_extra_state_attributes["shares"] = shares_str
+
+                # Perform calculation only if we have valid inputs
+                if linked_entity_id and shares_str is not None: # Check shares_str is not None
                     try:
                         shares = float(shares_str)
                         if shares <= 0:
@@ -625,12 +638,27 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
                     except Exception as e:
                          _LOGGER.error(f"Unexpected error calculating value for asset {self.name}: {e}")
                          calculated_value = "Calculation Error"
+                else:
+                    # If no entity_id or shares, calculated_value remains None
+                    _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: Skipping calculation (entity_id: {linked_entity_id}, shares_str: {shares_str})" )
+                    calculated_value = None # Explicitly set to None
 
                 self._attr_extra_state_attributes["calculated_value"] = calculated_value
+                _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: Final calculated_value: {calculated_value}") # Log final calc value
                 # --- End Calculated Value Logic ---
 
                 self.async_write_ha_state()
-                return # Added return to exit if data processed
+                return
+            else:
+                # Asset data not found in coordinator update
+                _LOGGER.debug(f"SENSOR_UPDATE [{self._asset_id}]: Base asset data not found in coordinator update.")
+                self._attr_available = False # Mark unavailable if base data is missing
+        else:
+            _LOGGER.warning(f"SENSOR_UPDATE [{self._asset_id}]: Coordinator data is invalid or unavailable.")
+            self._attr_available = False # Mark unavailable
+
+        # Ensure state is written even if unavailable
+        self.async_write_ha_state()
 
 
 # --- Liability Sensor ---
