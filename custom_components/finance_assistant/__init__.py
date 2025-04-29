@@ -173,8 +173,8 @@ def async_register_services(hass: HomeAssistant, coordinator):
                     continue
 
                 _LOGGER.info(f"Updating YNAB account {ynab_id} for budget {budget_id} with balance {new_value_milliunits}")
-                # Assuming ynab_client has an update_account method
-                await ynab_client.update_account(budget_id, ynab_id, update_payload)
+                # Assuming ynab_client has an accounts attribute which has an update_account method
+                await ynab_client.accounts.update_account(budget_id, ynab_id, update_payload)
                 _LOGGER.info(f"Successfully submitted update for asset {asset['name']} to YNAB.")
                 successful_updates += 1
 
@@ -299,7 +299,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 # --- Need to add YNAB client initialization and access --- NEW ---
-from ynab_api import ApiClient, Configuration, AccountsApi, YNABAPI
+from ynab_api import ApiClient, Configuration, YNABAPI
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
