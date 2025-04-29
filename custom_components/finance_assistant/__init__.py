@@ -152,8 +152,8 @@ def async_register_services(hass: HomeAssistant, coordinator):
                      failed_updates += 1
                      continue
 
-                # Instantiate the AccountsApi
-                accounts_api = AccountsApi(api_client)
+                # Instantiate the AccountsApi class from the imported module
+                accounts_api_instance = accounts_api.AccountsApi(api_client)
 
                 # YNAB API requires balance in milliunits and current date
                 update_payload = {
@@ -170,7 +170,7 @@ def async_register_services(hass: HomeAssistant, coordinator):
 
                 _LOGGER.info(f"Updating YNAB account {ynab_id} for budget {budget_id} with balance {new_value_milliunits}")
                 # Call update_account on the AccountsApi instance
-                await accounts_api.update_account(budget_id, ynab_id, update_payload)
+                await accounts_api_instance.update_account(budget_id, ynab_id, update_payload)
                 _LOGGER.info(f"Successfully submitted update for asset {asset['name']} to YNAB.")
                 successful_updates += 1
 
@@ -295,7 +295,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 # --- Need to add YNAB client initialization and access --- NEW ---
-from ynab_api import ApiClient, Configuration, AccountsApi
+from ynab_api import ApiClient, Configuration
+from ynab_api.api import accounts_api # Import the module
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
