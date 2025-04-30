@@ -481,92 +481,22 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
         # Initial update using cached coordinator data
         self._handle_coordinator_update()
 
-    @property
     def state(self):
-        """Return the state of the sensor (asset value)."""
+        """Return the state (balance)."""
+        # The native value is set in _handle_coordinator_update
         return self._attr_native_value
-
-    def _update_internal_state(self, asset_name):
-        """Update the sensor's internal state based on the latest data."""
-        if not self.coordinator.data or not isinstance(self.coordinator.data, dict):
-            _LOGGER.warning(f"Coordinator data missing or not a dict for asset {self._asset_id}")
-            self._attr_available = False
-            return
-
-        assets = self.coordinator.data.get("assets", [])
-        if not isinstance(assets, list):
-            _LOGGER.warning(f"\'assets\' data is not a list for asset {self._asset_id}")
-            self._attr_available = False
-            return
-
-        asset_data = self._find_data_by_id(assets, self._asset_id)
-
-        if asset_data:
-             # Check if data has actually changed
-            if asset_data == self._last_asset_data:
-                 _LOGGER.debug(f"Asset data for {self._asset_id} hasn\'t changed. Skipping update.")
-                 self._attr_available = True # Still available
-                 return
-
-            _LOGGER.debug(f"Updating state for asset {self._asset_id} with data: {asset_data}")
-            self._attr_native_value = ynab_milliunits_to_float(asset_data.get("balance"))
-            self._attr_name = asset_data.get("name", self._original_name) # Update name if changed
-
-            # --- Populate Attributes ---
-            new_attributes = {
-                "ynab_id": asset_data.get("id"),
-                "ynab_type": asset_data.get("type"), # Original YNAB type
-                "asset_type": asset_data.get("asset_type"), # Manual override type
-                "bank": asset_data.get("bank"), # Optional bank from manual entry
-                "on_budget": asset_data.get("on_budget"),
-                "closed": asset_data.get("closed"),
-                "cleared_balance": ynab_milliunits_to_float(asset_data.get("cleared_balance")),
-                "uncleared_balance": ynab_milliunits_to_float(asset_data.get("uncleared_balance")),
-                "transfer_payee_id": asset_data.get("transfer_payee_id"),
-                "direct_import_linked": asset_data.get("direct_import_linked"),
-                "direct_import_in_error": asset_data.get("direct_import_in_error"),
-                "last_reconciled_at": asset_data.get("last_reconciled_at"),
-                "deleted": asset_data.get("deleted"),
-                "associated_entity_id": asset_data.get("associated_entity_id"),
-                "number_of_shares": asset_data.get("number_of_shares"),
-                "value_last_updated": asset_data.get("value_last_updated"), # From manual data
-            }
-            # Filter out None values before setting attributes
-            self._attr_extra_state_attributes = {k: v for k, v in new_attributes.items() if v is not None}
-            # --- End Populate Attributes ---
-
-            self._attr_available = True
-            self._last_asset_data = asset_data # Cache the data
-            _LOGGER.debug(f"State updated for asset {self._asset_id}. New Value: {self._attr_native_value}, New Attrs: {self._attr_extra_state_attributes}")
-        else:
-            _LOGGER.warning(f"No data found for asset ID {self._asset_id} in coordinator update.")
-            self._attr_available = False
-            self._last_asset_data = None # Reset cache
 
     def _find_data_by_id(self, data_list, target_id):
         """Helper to find the specific asset data by ID."""
         return next((item for item in data_list if isinstance(item, dict) and item.get("id") == target_id), None)
 
-    @property
-    def available(self) -> bool:
-        """Return if entity is available."""
-        # Even if we can't find the asset in the current data, we still want to show the sensor
-        # as available with the last known value if we have coordinator data
-        return (
-            self.coordinator.last_update_success
-            and self.coordinator.data is not None
-            and isinstance(self.coordinator.data, dict)
-        )
-
-    async def async_update(self) -> None:
-        """Update the entity.
-        Only used by the generic entity update service.
-        """
-        await self.coordinator.async_request_refresh()
-
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
         _LOGGER.debug(f"Handling coordinator update for asset: {self.name} ({self._asset_id})")
+        # Assume unavailable until data is verified
+        self._attr_available = False
+        self._attr_native_value = None # Reset state
+
         if self.coordinator.data and isinstance(self.coordinator.data, dict):
             # Find the specific asset data using the asset_id
             assets_list = self.coordinator.data.get("assets", [])
@@ -578,30 +508,25 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
             _LOGGER.debug(f"Asset {self.name}: Fetched YNAB Data = {self._asset_data}")
             _LOGGER.debug(f"Asset {self.name}: Fetched Manual Details = {self._manual_details}")
 
-            if self._asset_data:
-                self._update_internal_state(self._asset_data.get("name", "Unknown Asset"))
-                self._attr_available = True
+            # --- Combined State and Attribute Logic --- NEW/REVISED ---
+            if self._asset_data: # Requires YNAB data to exist
+                # Set Main State (YNAB Value)
+                ynab_value_milliunits = self._asset_data.get("balance")
+                if isinstance(ynab_value_milliunits, int):
+                    self._attr_native_value = ynab_milliunits_to_float(ynab_value_milliunits)
+                    _LOGGER.debug(f"Asset {self.name}: Set native value (state) to {self._attr_native_value}")
+                else:
+                    _LOGGER.warning(f"Asset {self.name}: YNAB balance is not an integer: {ynab_value_milliunits}")
+                    self._attr_native_value = None # Explicitly set to None if invalid
 
-                # --- Update Attributes --- NEW/REVISED ---
+                # Prepare Extra Attributes
                 linked_entity_id = self._manual_details.get("entity_id") if self._manual_details else None
                 shares_str = self._manual_details.get("shares") if self._manual_details else None
                 last_updated_ts = self._manual_details.get("ynab_value_last_updated_on") if self._manual_details else None
                 shares = None
                 calculated_value = None
 
-                # Get YNAB value (sensor's main state is already this)
-                ynab_value_milliunits = self._asset_data.get("balance")
-                ynab_value_dollars = None
-                if isinstance(ynab_value_milliunits, int):
-                    ynab_value_dollars = ynab_milliunits_to_float(ynab_value_milliunits)
-
-                # Update attributes dictionary
-                current_attributes = self._attr_extra_state_attributes
-                current_attributes["linked_entity_id"] = linked_entity_id
-                current_attributes["shares"] = shares_str # Store the raw value from config
-                current_attributes["ynab_value"] = ynab_value_dollars
-                current_attributes["ynab_value_last_updated_on"] = last_updated_ts
-
+                # Calculate value if possible
                 if linked_entity_id and shares_str:
                     try:
                         shares = float(shares_str)
@@ -611,43 +536,54 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
                         entity_state = self.hass.states.get(linked_entity_id)
                         if entity_state is None:
                             _LOGGER.warning(f"Entity {linked_entity_id} not found for asset {self.name}")
-                            calculated_value = "Entity not found"
+                            calculated_value = None # Set to None if entity not found
                         else:
                             try:
                                 current_price = float(entity_state.state)
                                 calculated_value = round(current_price * shares, 2)
                             except (ValueError, TypeError):
                                 _LOGGER.warning(f"Entity {linked_entity_id} state '{entity_state.state}' is not a valid number for asset {self.name}")
-                                calculated_value = None
+                                calculated_value = None # Set to None if price invalid
 
                     except (ValueError, TypeError) as e:
                         _LOGGER.warning(f"Invalid shares value '{shares_str}' for asset {self.name}: {e}")
-                        calculated_value = "Invalid Shares"
+                        calculated_value = None # Set to None if shares invalid
                     except Exception as e:
                          _LOGGER.error(f"Unexpected error calculating value for asset {self.name}: {e}")
-                         calculated_value = "Calculation Error"
+                         calculated_value = None # Set to None on unexpected error
                 else:
                     calculated_value = None # No calculation possible
 
-                current_attributes["calculated_value"] = calculated_value
-                self._attr_extra_state_attributes = current_attributes # Re-assign the updated dict
-                # --- End Attribute Update ---
+                # Update attributes dictionary
+                # Start fresh each update to avoid stale attributes if data disappears
+                self._attr_extra_state_attributes = {
+                    "ynab_id": self._asset_id,
+                    "ynab_type": self._asset_data.get("ynab_type", self._asset_data.get("type")), # Use YNAB type if available
+                    "on_budget": self._asset_data.get("on_budget"),
+                    "cleared_balance": ynab_milliunits_to_float(self._asset_data.get("cleared_balance")),
+                    "uncleared_balance": ynab_milliunits_to_float(self._asset_data.get("uncleared_balance")),
+                    "deleted": self._asset_data.get("deleted"),
+                    "linked_entity_id": linked_entity_id,
+                    "shares": shares_str, # Store the raw value from config
+                    "ynab_value": self._attr_native_value, # Use the value we set for the state
+                    "ynab_value_last_updated_on": last_updated_ts,
+                    "calculated_value": calculated_value
+                }
+                # Remove None attributes for cleaner display
+                self._attr_extra_state_attributes = {k: v for k, v in self._attr_extra_state_attributes.items() if v is not None}
 
-                # --- Add Debug Log --- NEW ---
-                _LOGGER.debug(f"Asset {self.name}: Final attributes before write state = {self._attr_extra_state_attributes}")
-                # --- End Debug Log --- NEW ---
+                self._attr_available = True # Mark available since we processed data
+                _LOGGER.debug(f"Asset {self.name}: Final attributes = {self._attr_extra_state_attributes}")
+                # --- End Combined Logic ---
 
-                self.async_write_ha_state()
-                return # Added return to exit if data processed
             else:
                 _LOGGER.warning(f"Asset {self.name}: Did not find YNAB data in coordinator update.")
-                self._attr_available = False # Mark unavailable if no data
-
+                # Keep state None and unavailable
         else:
             _LOGGER.warning(f"Asset {self.name}: Coordinator data unavailable or not a dict.")
-            self._attr_available = False # Mark unavailable if coordinator data missing
+            # Keep state None and unavailable
 
-        # Ensure state is written even if unavailable
+        # Write state regardless of availability
         self.async_write_ha_state()
 
 
