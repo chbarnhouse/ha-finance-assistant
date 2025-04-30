@@ -1,7 +1,7 @@
 """The Finance Assistant integration."""
 import asyncio
 import logging
-from datetime import timedelta, datetime, date
+from datetime import timedelta, datetime
 import os
 import socket
 import json
@@ -18,13 +18,6 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.service import async_register_admin_service
 
 from .const import DOMAIN
-# Import the API client and exceptions
-from .api import (
-    FinanceAssistantApiClient,
-    FinanceAssistantApiClientAuthenticationError,
-    FinanceAssistantApiClientError,
-    ApiException,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,22 +26,29 @@ SCAN_INTERVAL = timedelta(minutes=5)
 
 PLATFORMS = [Platform.SENSOR]
 
-# --- Service Handler --- NEW ---
+# --- Service Handler --- REVISED ---
 def async_register_services(hass: HomeAssistant, coordinator):
     """Register services for the integration."""
 
-    async def async_handle_update_stock_assets(call) -> None:
-        """Handle the service call to update stock assets."""
-        _LOGGER.info("Service finance_assistant.update_stock_assets called.")
+    async def async_handle_reconcile_stock_assets(call) -> None:
+        """Handle the service call to reconcile stock assets via YNAB transactions."""
+        _LOGGER.info("Service finance_assistant.reconcile_stock_assets called.")
 
         # 1. Fetch all data from the coordinator (which gets it from the addon)
+        # Trigger a coordinator refresh first to get the latest YNAB balances
+        await coordinator.async_request_refresh()
+        # Wait a moment for refresh (or check status)
+        await asyncio.sleep(2) # Simple wait, consider coordinator.last_update_success
+
         if not coordinator.last_update_success or not coordinator.data:
-            _LOGGER.error("Cannot update stock assets: Coordinator data is unavailable or update failed.")
+            _LOGGER.error(
+                "Cannot reconcile stock assets: Coordinator data is unavailable or update failed."
+            )
             persistent_notification.async_create(
                 hass,
-                "Finance Assistant stock update failed: Could not fetch latest data from addon.",
+                "Finance Assistant reconciliation failed: Could not fetch latest data from addon.",
                 title="Finance Assistant Error",
-                notification_id="fa_stock_update_error",
+                notification_id="fa_reconcile_error",
             )
             return
 
@@ -58,47 +58,48 @@ def async_register_services(hass: HomeAssistant, coordinator):
         asset_types = all_data.get("asset_types", [])
 
         # Find the ID for the "Stocks" asset type
-        stock_type_id = next((t.get("id") for t in asset_types if t.get("name") == "Stocks"), None)
+        stock_type_id = next(
+            (t.get("id") for t in asset_types if t.get("name") == "Stocks"), None
+        )
         if not stock_type_id:
-            _LOGGER.error("Cannot update stock assets: 'Stocks' asset type ID not found in addon data.")
+            _LOGGER.error(
+                "Cannot reconcile stock assets: 'Stocks' asset type ID not found in addon data."
+            )
             persistent_notification.async_create(
                 hass,
-                "Finance Assistant stock update failed: Could not find 'Stocks' asset type.",
+                "Finance Assistant reconciliation failed: Could not find 'Stocks' asset type.",
                 title="Finance Assistant Error",
-                notification_id="fa_stock_update_error",
+                notification_id="fa_reconcile_error",
             )
             return
 
         _LOGGER.debug(f"Found 'Stocks' asset type ID: {stock_type_id}")
 
         # 2. Filter YNAB accounts to find eligible stock assets
-        assets_to_update = []
+        assets_to_reconcile = []
         for acc in all_ynab_accounts:
-            # Ensure it's a dictionary and not closed/deleted
             if not isinstance(acc, dict) or acc.get("closed") or acc.get("deleted"):
                 continue
 
-            # Check if it's a known YNAB asset (tracking accounts)
-            # YNAB types: checking, savings, cash, creditCard, lineOfCredit, otherAsset, otherLiability, mortgage, autoLoan, studentLoan, personalLoan
-            # We only care about 'otherAsset' for this purpose, but we filter by manual type ID
             ynab_account_id = acc.get("id")
             if not ynab_account_id:
                 continue
 
-            # Get manual details for this asset
             asset_details = manual_assets.get(ynab_account_id)
             if not asset_details:
-                continue # No manual details, skip
+                continue
 
-            # Check if the manual type is Stocks
             if asset_details.get("type_id") != stock_type_id:
-                continue # Not a stock asset based on manual type
+                continue
 
-            # Check for entity_id and shares
             entity_id = asset_details.get("entity_id")
-            shares_str = asset_details.get("shares") # Shares are stored as string in JSON?
-            if not entity_id or not shares_str:
-                _LOGGER.debug(f"Skipping asset {acc.get('name')} ({ynab_account_id}): Missing entity_id or shares in manual details.")
+            shares_str = asset_details.get("shares")
+            current_ynab_balance = acc.get("balance") # Milliunits from YNAB
+
+            if not entity_id or not shares_str or not isinstance(current_ynab_balance, int):
+                _LOGGER.debug(
+                    f"Skipping asset {acc.get('name')} ({ynab_account_id}): Missing entity_id, shares, or valid YNAB balance."
+                )
                 continue
 
             try:
@@ -106,148 +107,167 @@ def async_register_services(hass: HomeAssistant, coordinator):
                 if shares <= 0:
                     raise ValueError("Shares must be positive")
             except (ValueError, TypeError):
-                _LOGGER.warning(f"Skipping asset {acc.get('name')} ({ynab_account_id}): Invalid shares value '{shares_str}'.")
+                _LOGGER.warning(
+                    f"Skipping asset {acc.get('name')} ({ynab_account_id}): Invalid shares value '{shares_str}'."
+                )
                 continue
 
-            # If all checks pass, add to list
-            assets_to_update.append({
-                "ynab_account_id": ynab_account_id,
-                "name": acc.get("name"),
-                "entity_id": entity_id,
-                "shares": shares,
-            })
+            assets_to_reconcile.append(
+                {
+                    "ynab_account_id": ynab_account_id,
+                    "name": acc.get("name"),
+                    "entity_id": entity_id,
+                    "shares": shares,
+                    "ynab_balance_milliunits": current_ynab_balance,
+                }
+            )
 
-        _LOGGER.info(f"Found {len(assets_to_update)} stock assets linked to HA entities to update.")
+        _LOGGER.info(
+            f"Found {len(assets_to_reconcile)} stock assets linked to HA entities to reconcile."
+        )
 
-        if not assets_to_update:
-            _LOGGER.info("No eligible stock assets found to update.")
-            return # Nothing more to do
+        if not assets_to_reconcile:
+            _LOGGER.info("No eligible stock assets found to reconcile.")
+            return
 
-        # 3. Iterate and update each asset
+        # Get Budget ID and API Client
+        budget_id = coordinator.config_entry.data.get("ynab_budget_id")
+        api_client = await coordinator._get_ynab_client() # Get the ApiClient
+
+        if not budget_id:
+            _LOGGER.error("Cannot reconcile: YNAB Budget ID not found in config entry.")
+            return
+        if not api_client:
+             _LOGGER.error("Cannot reconcile: Could not get YNAB ApiClient from coordinator.")
+             return
+
+        # Import and instantiate TransactionsApi
+        try:
+            from ynab_api.api import transactions_api
+            from ynab_api.model.save_transaction import SaveTransaction
+            from ynab_api.model.save_transactions_wrapper import SaveTransactionsWrapper
+        except ImportError as e:
+            _LOGGER.error(f"Failed to import required YNAB API models: {e}")
+            return
+
+        transactions_api_instance = transactions_api.TransactionsApi(api_client)
+
+        # 3. Iterate and reconcile each asset
         successful_updates = 0
         failed_updates = 0
-        for asset in assets_to_update:
-            _LOGGER.debug(f"Processing asset: {asset['name']}")
+        today_iso = datetime.now(tz=dt_util.get_default_local_timezone()).date().isoformat()
+
+        for asset in assets_to_reconcile:
+            _LOGGER.debug(f"Reconciling asset: {asset['name']}")
             entity_id = asset["entity_id"]
             shares = asset["shares"]
             ynab_id = asset["ynab_account_id"]
+            current_ynab_balance_milliunits = asset["ynab_balance_milliunits"]
 
-            # 4. Get HA entity state
+            # Get HA entity state for current price
             entity_state = hass.states.get(entity_id)
             if not entity_state:
-                _LOGGER.error(f"Failed to update {asset['name']}: Entity {entity_id} not found.")
+                _LOGGER.error(f"Failed to reconcile {asset['name']}: Entity {entity_id} not found.")
                 failed_updates += 1
                 continue
 
             try:
                 current_price = float(entity_state.state)
             except (ValueError, TypeError):
-                _LOGGER.error(f"Failed to update {asset['name']}: Entity {entity_id} state '{entity_state.state}' is not a valid number.")
+                _LOGGER.error(
+                    f"Failed to reconcile {asset['name']}: Entity {entity_id} state '{entity_state.state}' is not a valid number."
+                )
                 failed_updates += 1
                 continue
 
-            # 5. Calculate new value
-            new_value_milliunits = int(round(current_price * shares * 1000))
-            _LOGGER.debug(f"Asset: {asset['name']}, Entity: {entity_id}, Price: {current_price}, Shares: {shares}, New Value (milliunits): {new_value_milliunits}")
+            # Calculate the target value based on HA
+            calculated_value_milliunits = int(round(current_price * shares * 1000))
+            adjustment_milliunits = calculated_value_milliunits - current_ynab_balance_milliunits
 
-            # 6. Fetch current balance and calculate adjustment
-            current_ynab_balance_milliunits = None
-            account_data = next((acc for acc in all_ynab_accounts if acc.get("id") == ynab_id), None)
-            if account_data and isinstance(account_data.get("balance"), int):
-                current_ynab_balance_milliunits = account_data["balance"]
-            else:
-                _LOGGER.warning(f"Could not find current balance for YNAB account {asset['name']} ({ynab_id}). Skipping adjustment.")
-                failed_updates += 1
-                continue
-
-            adjustment_milliunits = new_value_milliunits - current_ynab_balance_milliunits
-
-            # Skip if difference is zero (or very small to avoid noise)
-            if abs(adjustment_milliunits) < 10: # Less than 1 cent difference
-                _LOGGER.info(f"Skipping adjustment for {asset['name']}: Calculated value matches YNAB balance.")
-                # Consider this a success? Or just skip?
-                continue
-
-            # 7. Construct Adjustment Transaction
-            today_date = date.today().isoformat()
-            # Create a unique import ID: fa-adj-<accountId>-<date>
-            import_id = f"fa-adj-{ynab_id}-{today_date}"
-            # Limit import_id to 36 chars as per YNAB API spec
-            if len(import_id) > 36:
-                import_id = import_id[:36]
-
-            # Need SaveTransaction model
-            # Use ynab_api namespace
-            transaction_payload_model = ynab_api.SaveTransaction(
-                account_id=ynab_id,
-                date=today_date,
-                amount=adjustment_milliunits,
-                payee_name="Market Adjustment", # Or "Stock Value Update"
-                cleared="cleared",
-                approved=True,
-                memo=f"HA Update: {shares} shares @ ${current_price:.2f} = ${new_value_milliunits/1000:.2f}",
-                import_id=import_id
+            _LOGGER.debug(
+                f"Asset: {asset['name']}, HA Price: {current_price}, Shares: {shares}, Calculated Value: {calculated_value_milliunits}, YNAB Value: {current_ynab_balance_milliunits}, Adjustment: {adjustment_milliunits}"
             )
 
-            # 8. Call YNAB API to create transaction
+            # Only create transaction if adjustment is >= 1 cent (10 milliunits)
+            if abs(adjustment_milliunits) < 10:
+                 _LOGGER.info(f"Skipping reconciliation for {asset['name']}: Adjustment ({adjustment_milliunits} milliunits) is less than 1 cent.")
+                 # Still mark as updated?
+                 try:
+                    # Update timestamp via addon API
+                    await coordinator._request(
+                        "POST", f"/manual_asset/{ynab_id}/reconciled"
+                    )
+                    _LOGGER.debug(f"Marked asset {asset['name']} as reconciled (no transaction needed).")
+                    # successful_updates += 1 # Don't count as success if no txn?
+                 except Exception as ts_err:
+                     _LOGGER.error(f"Failed to update reconciliation timestamp for {asset['name']} after skipping transaction: {ts_err}")
+                     # Don't count as failure if only timestamp update fails?
+                 continue
+
+            # Create YNAB Transaction
             try:
-                # Get the ApiClient from the coordinator
-                api_client = await coordinator._get_ynab_client()
-                if not api_client:
-                     _LOGGER.error(f"Failed to create adjustment for {asset['name']}: Could not get YNAB ApiClient.")
-                     failed_updates += 1
-                     continue
+                transaction_payload = SaveTransaction(
+                    account_id=ynab_id,
+                    date=today_iso,
+                    amount=adjustment_milliunits,
+                    payee_name="Market Adjustment",
+                    memo=f"HA Sync: Price={current_price}, Shares={shares}",
+                    cleared=SaveTransaction.ClearedEnum.CLEARED,
+                    approved=True,
+                )
+                wrapper = SaveTransactionsWrapper(transaction=transaction_payload)
 
-                # Instantiate the TransactionsApi
-                # Use ynab_api namespace
-                transactions_api_instance = ynab_api.TransactionsApi(api_client)
+                _LOGGER.info(
+                    f"Creating YNAB adjustment transaction for {asset['name']} ({ynab_id}): Amount={adjustment_milliunits}"
+                )
+                await transactions_api_instance.create_transaction(budget_id, wrapper)
+                _LOGGER.info(f"Successfully created adjustment transaction for {asset['name']} in YNAB.")
 
-                # budget_id should be available from config entry
-                budget_id = coordinator.config_entry.data.get("ynab_budget_id")
-                if not budget_id:
-                    _LOGGER.error(f"Failed to create adjustment for {asset['name']}: YNAB Budget ID not found.")
-                    failed_updates += 1
-                    continue
-
-                _LOGGER.info(f"Creating adjustment transaction for {asset['name']} ({ynab_id}) in budget {budget_id} for amount {adjustment_milliunits}")
-                # Call create_transaction - expects SaveTransactionsWrapper
-                # Use .to_dict() on the model instance
-                await transactions_api_instance.create_transaction(budget_id, {"transaction": transaction_payload_model.to_dict()})
-                _LOGGER.info(f"Successfully submitted adjustment transaction for asset {asset['name']} to YNAB.")
-                successful_updates += 1
+                # Update reconciliation timestamp via addon API
+                try:
+                    await coordinator._request("POST", f"/manual_asset/{ynab_id}/reconciled")
+                    _LOGGER.info(f"Successfully updated reconciliation timestamp for {asset['name']}.")
+                    successful_updates += 1
+                except Exception as ts_update_err:
+                     _LOGGER.error(f"YNAB transaction created for {asset['name']}, but failed to update reconciliation timestamp in addon: {ts_update_err}")
+                     # Count as success because YNAB was updated, but maybe log prominently?
+                     successful_updates += 1 # Still count YNAB update as success
+                     # Optionally add a specific persistent notification for timestamp failure?
 
             except Exception as e:
-                _LOGGER.exception(f"Failed to create adjustment transaction for {asset['name']} ({ynab_id}): {e}")
+                _LOGGER.exception(
+                    f"Failed to create YNAB transaction for asset {asset['name']} ({ynab_id}): {e}"
+                )
                 failed_updates += 1
 
-        # 9. Final Notification
+        # Final Notification
         if failed_updates > 0:
             persistent_notification.async_create(
                 hass,
-                f"Finance Assistant stock update completed with {failed_updates} errors and {successful_updates} successes.",
-                title="Finance Assistant Stock Update Issues",
-                notification_id="fa_stock_update_error", # Reuse ID to replace previous error
+                f"Finance Assistant reconciliation completed with {failed_updates} errors and {successful_updates} successes.",
+                title="Finance Assistant Reconciliation Issues",
+                notification_id="fa_reconcile_error",
             )
         elif successful_updates > 0:
             persistent_notification.async_create(
                 hass,
-                f"Finance Assistant successfully updated {successful_updates} stock asset(s) in YNAB.",
-                title="Finance Assistant Stock Update",
-                notification_id="fa_stock_update_success",
+                f"Finance Assistant successfully reconciled {successful_updates} stock asset(s) in YNAB.",
+                title="Finance Assistant Reconciliation",
+                notification_id="fa_reconcile_success",
             )
         else:
-             _LOGGER.info("Stock update service ran, but no assets were updated (either none eligible or all failed).")
-             # Optionally notify that nothing was updated?
-             pass
+             _LOGGER.info(
+                "Reconciliation service ran, but no assets required transaction updates."
+             )
 
     # Register the service
     hass.services.async_register(
         DOMAIN,
-        "update_stock_assets",
-        async_handle_update_stock_assets,
+        "reconcile_stock_assets", # Use new service name
+        async_handle_reconcile_stock_assets,
     )
 
-# --- END Service Handler --- NEW ---
+# --- END Service Handler --- REVISED ---
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -318,17 +338,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Forward the setup to the sensor platform
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # --- Register Services --- NEW ---
+    # --- Register Services --- REVISED ---
     async_register_services(hass, coordinator)
-    # --- END Register Services --- NEW ---
+    # --- END Register Services --- REVISED ---
 
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    # Remove services
-    hass.services.async_remove(DOMAIN, "update_stock_assets") # NEW
+    # Remove services - REVISED
+    hass.services.async_remove(DOMAIN, "reconcile_stock_assets")
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
@@ -337,11 +357,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 # --- Need to add YNAB client initialization and access --- NEW ---
-# Corrected import: Import only the base package
-import ynab_api
-# Removed: from ynab_api import ApiClient, Configuration, AccountsApi
-# Removed: from ynab_api.api import transactions_api # Import TransactionsApi module
-# Removed: from ynab_api.model.save_transaction import SaveTransaction # Import SaveTransaction model
+from ynab_api import ApiClient, Configuration
+from ynab_api.api import accounts_api # Import the module
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
@@ -381,22 +398,13 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         # Initialize YNAB Client placeholder
         self._ynab_client = None
 
-        # Instantiate the API client object and assign to self.api
-        self.api = FinanceAssistantApiClient(
-            session=self.websession,
-            supervisor_url=self.supervisor_url,
-            direct_url=self.direct_url,
-            supervisor_token=self.supervisor_token
-        )
-
-        _LOGGER.debug("Coordinator initialized. API client created.")
-
         # Call super().__init__ AFTER defining attributes used by it
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             update_interval=SCAN_INTERVAL,
+            # config_entry=entry # Pass the config entry here
         )
         self.config_entry = entry # Store config_entry if needed elsewhere
 
@@ -410,25 +418,140 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.error("YNAB API key not found in config entry.")
             return None
 
-        # Use ynab_api namespace
-        configuration = ynab_api.Configuration()
+        configuration = Configuration()
         configuration.api_key['Authorization'] = ynab_api_key
         configuration.api_key_prefix['Authorization'] = 'Bearer'
 
         # Return the configured ApiClient instance
-        # Use ynab_api namespace
-        self._ynab_client = ynab_api.ApiClient(configuration)
+        self._ynab_client = ApiClient(configuration)
         _LOGGER.info("YNAB ApiClient initialized.")
         return self._ynab_client
 
+    async def _request(self, method, endpoint, params=None, data=None, json_data=None):
+        """Make an API request, trying the appropriate method based on environment."""
+        headers = {}
+        last_error = None
+        endpoint_clean = endpoint.lstrip('/')
+
+        # Determine primary and secondary URLs/methods based on environment
+        primary_url = None
+        secondary_url = None
+        primary_method = "Unknown"
+        secondary_method = "Unknown"
+
+        if self.supervisor_token:
+            # Production/Supervisor: Try Supervisor first, fallback to Direct (slug)
+            primary_url = f"{self.supervisor_url}/{endpoint_clean}"
+            primary_method = "Supervisor"
+            secondary_url = f"{self.direct_url}/{endpoint_clean}" # Uses slug hostname here
+            secondary_method = "Direct (via slug)"
+            headers = {"Authorization": f"Bearer {self.supervisor_token}"}
+            _LOGGER.debug(f"Supervisor env detected. Primary: {primary_method}, Secondary: {secondary_method}")
+        else:
+            # Dev environment: Prioritize Direct (host.docker.internal)
+            primary_url = f"{self.direct_url}/{endpoint_clean}" # Uses host.docker.internal here
+            primary_method = "Direct (via host.docker.internal)"
+            # No Supervisor fallback possible without token
+            secondary_url = None
+            secondary_method = "None"
+            _LOGGER.debug(f"Dev env detected. Primary: {primary_method}, No Secondary.")
+
+        # --- 1. Try Primary Method ---
+        if primary_url:
+            _LOGGER.debug(f"Attempting {primary_method} API request to: {primary_url}")
+            primary_headers = headers.copy() # Use appropriate headers for primary
+            try:
+                async with self.websession.request(
+                    method, primary_url, headers=primary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if 200 <= response.status < 300:
+                        _LOGGER.debug(f"{primary_method} API success ({response.status}) for {endpoint}")
+                        try:
+                            if response.status == 204: return {} # Handle No Content
+                            return await response.json()
+                        except (aiohttp.ContentTypeError, json.JSONDecodeError) as json_err:
+                            content_text = await response.text()
+                            _LOGGER.error(f"{primary_method} API returned non-JSON (status {response.status}): {json_err}. Content: {content_text[:100]}...")
+                            last_error = UpdateFailed(f"{primary_method} API returned non-JSON: {content_text[:100]}...")
+                        except Exception as err:
+                            _LOGGER.error(f"Unexpected {primary_method} API error for {endpoint}: {err}", exc_info=True)
+                            last_error = UpdateFailed(f"Unexpected {primary_method} API error: {err}")
+                    # --- Handle specific non-success codes before fallback ---
+                    elif response.status == 404:
+                         # Downgrade 404 from warning to info, as fallback is expected sometimes
+                         _LOGGER.info(f"{primary_method} API 404 for {endpoint}. Check slug/endpoint/token. Falling back if possible.")
+                         last_error = UpdateFailed(f"{primary_method} API 404 for {endpoint}")
+                    elif response.status == 401:
+                         _LOGGER.warning(f"{primary_method} API 401 for {endpoint}. Check token. Falling back if possible.")
+                         last_error = UpdateFailed(f"{primary_method} API 401 for {endpoint}")
+                    else:
+                        response_text = await response.text()
+                        _LOGGER.warning(f"{primary_method} API failed ({response.status}) for {endpoint}. Response: {response_text[:200]}... Falling back if possible.")
+                        last_error = UpdateFailed(f"{primary_method} API failed ({response.status}): {response_text[:100]}...")
+
+            except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
+                _LOGGER.warning(f"{primary_method} API connection error for {endpoint}: {err}. Falling back if possible.")
+                last_error = UpdateFailed(f"{primary_method} API connection error: {err}")
+            except Exception as err:
+                 _LOGGER.error(f"Unexpected {primary_method} API error for {endpoint}: {err}", exc_info=True)
+                 last_error = UpdateFailed(f"Unexpected {primary_method} API error: {err}")
+        else:
+             # Should not happen if logic above is correct, but good to handle
+             _LOGGER.error("Primary URL was not determined. Cannot make request.")
+             raise UpdateFailed("Internal configuration error: Primary URL not set.")
+
+        # --- 2. Try Secondary Method (if Primary failed and Secondary exists) ---
+        if last_error and secondary_url:
+            _LOGGER.info(f"Primary method failed ({last_error}). Attempting {secondary_method} API fallback to: {secondary_url}")
+            secondary_headers = {} # Direct fallback doesn't use Supervisor token
+            try:
+                async with self.websession.request(
+                    method, secondary_url, headers=secondary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=15)
+                ) as response:
+                    if 200 <= response.status < 300:
+                        _LOGGER.info(f"{secondary_method} API success ({response.status}) for {endpoint}") # Log fallback success as info
+                        # Fallback succeeded, clear the error and return data
+                        last_error = None
+                        try:
+                             if response.status == 204: return {} # Handle No Content
+                             return await response.json()
+                        except (aiohttp.ContentTypeError, json.JSONDecodeError) as json_err:
+                            content_text = await response.text()
+                            _LOGGER.error(f"{secondary_method} API returned non-JSON (status {response.status}): {json_err}. Content: {content_text[:100]}...")
+                            # Even though fallback connection worked, data is bad, raise UpdateFailed
+                            raise UpdateFailed(f"{secondary_method} API returned non-JSON: {content_text[:100]}...")
+                    else:
+                        # Fallback attempt also failed
+                        response_text = await response.text()
+                        _LOGGER.error(f"{secondary_method} API request failed ({response.status}) for {endpoint}. Response: {response_text[:200]}...")
+                        # Raise an error indicating the fallback failure, potentially including the original primary error?
+                        # Re-raising the *last_error* (from primary) might be more informative here
+                        raise last_error or UpdateFailed(f"{secondary_method} API failed ({response.status}): {response_text[:100]}...")
+
+            except (aiohttp.ClientConnectorError, asyncio.TimeoutError, socket.gaierror) as err:
+                _LOGGER.error(f"{secondary_method} API connection error for {endpoint}: {err}. Raising original error.")
+                raise last_error or UpdateFailed(f"{secondary_method} API connection error: {err}") # Raise original or new error
+            except Exception as err:
+                _LOGGER.error(f"Unexpected {secondary_method} API error for {endpoint}: {err}", exc_info=True)
+                raise last_error or UpdateFailed(f"Unexpected {secondary_method} API error: {err}") # Raise original or new error
+
+        # If we reached here and last_error still exists, it means primary failed and no secondary was attempted OR secondary also failed
+        if last_error:
+            _LOGGER.error(f"API request failed for {endpoint} after all attempts. Final error: {last_error}")
+            raise last_error
+
+        # If we somehow get here without returning data or raising an error (shouldn't happen)
+        _LOGGER.error(f"API request for {endpoint} finished unexpectedly without result or error.")
+        raise UpdateFailed("API request finished unexpectedly.")
+
     async def verify_connection(self):
         """Verify connection to the addon API by trying to ping it."""
-        _LOGGER.info("Verifying connection to Finance Assistant addon API (via API client)...")
+        _LOGGER.info("Verifying connection to Finance Assistant addon API...")
         try:
-            # Use the API client's request method for ping
-            await self.api.async_ping()
-            _LOGGER.info("Addon API connection successful (via API client).")
-        except (FinanceAssistantApiClientError, FinanceAssistantApiClientAuthenticationError) as err:
+            # Use the _request method which handles fallback logic
+            await self._request("GET", "/ping")
+            _LOGGER.info("Addon API connection successful.")
+        except UpdateFailed as err:
             _LOGGER.error(f"Failed to connect to addon API: {err}")
             persistent_notification.async_create(
                 self.hass,
@@ -441,130 +564,23 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.error(f"Unexpected error during connection verification: {err}", exc_info=True)
             raise ConfigEntryNotReady(f"Unexpected error verifying connection: {err}") from err
 
-    async def _async_update_data(self) -> dict:
-        """Fetch data from API endpoint and YNAB.
-
-        This is the place to fetch data from your API endpoint,
-        or correlate data from multiple sources (e.g. YNAB and local addon data).
-        """
-        _LOGGER.debug("COORDINATOR: Starting data update...") # Log start
+    async def _async_update_data(self):
+        """Fetch data from the Finance Assistant addon API."""
+        _LOGGER.debug("Fetching all data from addon...")
         try:
-            # Attempt to fetch data from the addon's API first
-            # Initialize data structure
-            combined_data = {
-                "accounts": [],
-                "assets": [],
-                "liabilities": [],
-                "credit_cards": [],
-                "manual_assets": {}, # Store manual asset details keyed by YNAB ID
-                "ynab_accounts": [], # Keep raw YNAB accounts separate initially
-                "banks": [], # Add banks list
-                "account_types": [], # Add account_types list
-                "asset_types": [], # Add asset_types list
-                "liability_types": [] # Add liability_types list
-            }
-
-            _LOGGER.debug("COORDINATOR: Fetching data from addon API via client...")
-            # Use the API client instance (self.api)
-            addon_data = await self.api.async_get_all_data()
-            _LOGGER.debug(f"COORDINATOR: Received addon data: {addon_data}")
-
-            # Process data from addon
-            if addon_data:
-                 # Extract different data types, handling potential missing keys gracefully
-                 combined_data["accounts"] = addon_data.get("accounts", [])
-                 combined_data["banks"] = addon_data.get("banks", [])
-                 combined_data["account_types"] = addon_data.get("account_types", [])
-                 combined_data["asset_types"] = addon_data.get("asset_types", [])
-                 combined_data["liability_types"] = addon_data.get("liability_types", [])
-                 # Add missing assignments for assets, liabilities, credit_cards from addon data
-                 combined_data["assets"] = addon_data.get("assets", [])
-                 combined_data["liabilities"] = addon_data.get("liabilities", [])
-                 combined_data["credit_cards"] = addon_data.get("credit_cards", [])
-
-                 # Process manual assets specifically
-                 if isinstance(addon_data.get("manual_assets"), list):
-                     for asset_detail in addon_data["manual_assets"]:
-                         if asset_detail and isinstance(asset_detail, dict) and asset_detail.get("ynab_id"):
-                             combined_data["manual_assets"][asset_detail["ynab_id"]] = asset_detail
-                         else:
-                             _LOGGER.warning(f"COORDINATOR: Skipping manual asset detail due to missing ynab_id: {asset_detail}")
-                 else:
-                     _LOGGER.debug("COORDINATOR: No valid manual_assets list found in addon data.")
-            else:
-                _LOGGER.warning("COORDINATOR: No data received from addon API.")
-
-            # Fetch data from YNAB if API key is configured
-            ynab_api_key = self.config_entry.data.get("ynab_api_key")
-            ynab_budget_id = self.config_entry.data.get("ynab_budget_id")
-
-            if ynab_api_key and ynab_budget_id:
-                _LOGGER.debug("COORDINATOR: YNAB key and budget found, fetching YNAB accounts...")
-                ynab_client = await self._get_ynab_client()
-                if ynab_client:
-                    accounts_api = ynab_api.AccountsApi(ynab_client)
-                    try:
-                        # Note: get_accounts may need error handling if budget_id is invalid
-                        api_response = await self.hass.async_add_executor_job(
-                            accounts_api.get_accounts, ynab_budget_id
-                        )
-                        _LOGGER.debug(f"COORDINATOR: YNAB API response received.") # Add log here
-                        if hasattr(api_response, 'data') and hasattr(api_response.data, 'accounts'):
-                            combined_data["ynab_accounts"] = [
-                                account.to_dict()
-                                for account in api_response.data.accounts
-                                if not account.closed # Exclude closed accounts
-                            ]
-                            _LOGGER.debug(f"COORDINATOR: Processed {len(combined_data['ynab_accounts'])} open YNAB accounts.")
-                            # TODO: Merge/correlate YNAB accounts with addon data if needed
-                            # For now, just use YNAB accounts directly as assets/liabilities etc.
-                            # Separate YNAB accounts into assets/liabilities based on type?
-                            # YNAB Types: checking, savings, creditCard, cash, lineOfCredit, otherAsset, otherLiability, mortgage, autoLoan, studentLoan, personalLoan
-
-                            # Clear existing assets/liabilities before populating from YNAB
-                            combined_data["assets"] = []
-                            combined_data["liabilities"] = []
-                            combined_data["credit_cards"] = []
-
-                            for acc in combined_data["ynab_accounts"]:
-                                if acc.get('type') in ['checking', 'savings', 'cash', 'otherAsset']:
-                                    combined_data["assets"].append(acc)
-                                elif acc.get('type') in ['creditCard', 'lineOfCredit', 'otherLiability', 'mortgage', 'autoLoan', 'studentLoan', 'personalLoan']:
-                                    # Maybe separate credit cards?
-                                    if acc.get('type') == 'creditCard':
-                                        combined_data["credit_cards"].append(acc)
-                                    else:
-                                        combined_data["liabilities"].append(acc)
-                                else:
-                                     _LOGGER.warning(f"COORDINATOR: Unhandled YNAB account type: {acc.get('type')} for account {acc.get('name')}")
-
-                        else:
-                            _LOGGER.error("COORDINATOR: Invalid YNAB API response structure.")
-                    except ApiException as e:
-                        _LOGGER.error(f"COORDINATOR: Exception when calling YNAB AccountsApi->get_accounts: {e}")
-                    except Exception as e:
-                        _LOGGER.error(f"COORDINATOR: Unexpected error fetching YNAB accounts: {e}")
-                else:
-                    _LOGGER.warning("COORDINATOR: Failed to initialize YNAB client.")
-            else:
-                _LOGGER.debug("COORDINATOR: YNAB API key or budget ID not configured. Skipping YNAB fetch.")
-
-            # TODO: Add fetching logic for other addon data types (accounts, liabilities, credit cards) if needed
-            # For now, focus on merging manual asset details with YNAB asset data
-
-            _LOGGER.debug(f"COORDINATOR: Final combined data before return: {combined_data}")
-            return combined_data
-
-        # Use the imported exception classes
-        except FinanceAssistantApiClientAuthenticationError as exception:
-            _LOGGER.error("COORDINATOR: Addon authentication error.")
-            raise UpdateFailed("Addon authentication error") from exception
-        except FinanceAssistantApiClientError as exception:
-            _LOGGER.error(f"COORDINATOR: Addon API communication error: {exception}")
-            raise UpdateFailed("Addon API communication error") from exception
-        except Exception as exception:
-            _LOGGER.error(f"COORDINATOR: Unexpected error during data update: {exception}")
-            # Log traceback for unexpected errors
-            import traceback
-            _LOGGER.error(traceback.format_exc())
-            raise UpdateFailed("Unexpected error during data update") from exception
+            # Use the internal request method
+            data = await self._request("GET", "/all_data")
+            _LOGGER.debug("Successfully fetched data from addon.")
+            return data
+        except UpdateFailed as err:
+            _LOGGER.error(f"Error fetching data from Finance Assistant addon: {err}")
+            persistent_notification.async_create(
+                self.hass,
+                f"Could not fetch data from the Finance Assistant addon. Error: {err}",
+                title="Finance Assistant Update Error",
+                notification_id="fa_update_error",
+            )
+            raise # Re-raise the UpdateFailed exception
+        except Exception as err:
+             _LOGGER.error(f"Unexpected error fetching data: {err}", exc_info=True)
+             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
