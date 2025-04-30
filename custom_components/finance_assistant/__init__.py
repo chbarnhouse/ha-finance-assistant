@@ -566,21 +566,32 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         """Fetch data from the Finance Assistant addon API."""
-        _LOGGER.debug("Fetching all data from addon...")
+        _LOGGER.debug("Coordinator: Starting data update...")
         try:
-            # Use the internal request method
-            data = await self._request("GET", "/all_data")
-            _LOGGER.debug("Successfully fetched data from addon.")
-            return data
-        except UpdateFailed as err:
-            _LOGGER.error(f"Error fetching data from Finance Assistant addon: {err}")
-            persistent_notification.async_create(
-                self.hass,
-                f"Could not fetch data from the Finance Assistant addon. Error: {err}",
-                title="Finance Assistant Update Error",
-                notification_id="fa_update_error",
-            )
-            raise # Re-raise the UpdateFailed exception
-        except Exception as err:
-             _LOGGER.error(f"Unexpected error fetching data: {err}", exc_info=True)
-             raise UpdateFailed(f"Unexpected error fetching data: {err}") from err
+            # Call the /api/all_data endpoint
+            raw_data = await self._request("GET", "/all_data")
+            _LOGGER.debug(f"Coordinator: Received raw data from addon: {str(raw_data)[:1000]}...") # Log raw data
+
+            if not isinstance(raw_data, dict):
+                 _LOGGER.error(f"Coordinator: Received non-dict data from addon. Type: {type(raw_data)}")
+                 return self.data # Return previous data on error
+
+            # --- Perform basic data validation --- NEW --- (Added for troubleshooting)
+            expected_keys = ["accounts", "assets", "liabilities", "credit_cards", "transactions", "scheduled_transactions"]
+            missing_keys = [key for key in expected_keys if key not in raw_data]
+            if missing_keys:
+                 _LOGGER.warning(f"Coordinator: Data received from addon is missing expected keys: {missing_keys}")
+                 # Decide if this is critical - maybe still return partial data?
+                 # For now, log and return raw_data, sensors will handle missing keys
+            # --- End basic data validation --- NEW ---
+
+            # Return the fetched data dictionary
+            _LOGGER.debug(f"Coordinator: Successfully fetched and returning data with keys: {list(raw_data.keys())}")
+            return raw_data
+
+        except aiohttp.ClientConnectorError as conn_err:
+            _LOGGER.error(f"Coordinator: Connection error fetching data: {conn_err}")
+            return self.data # Return previous data on connection error
+        except Exception as e:
+            _LOGGER.error(f"Coordinator: Unexpected error fetching data: {e}", exc_info=True)
+            return self.data # Return previous data on other errors
