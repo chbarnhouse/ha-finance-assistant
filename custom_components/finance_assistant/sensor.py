@@ -492,99 +492,138 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        _LOGGER.debug(f"Handling coordinator update for asset: {self.name} ({self._asset_id})")
-        # Assume unavailable until data is verified
-        self._attr_available = False
-        self._attr_native_value = None # Reset state
+        _LOGGER.debug(f"Handling coordinator update for asset: {self._attr_name}")
+
+        # Initialize with a default numeric state to potentially avoid recursion
+        self._attr_native_value = 0.0
+        self._attr_available = False # Default to unavailable
 
         if self.coordinator.data and isinstance(self.coordinator.data, dict):
-            # Find the specific asset data using the asset_id
-            assets_list = self.coordinator.data.get("assets", [])
-            self._asset_data = self._find_data_by_id(assets_list, self._asset_id)
+            assets = self.coordinator.data.get("assets", [])
+            manual_assets = self.coordinator.data.get("manual_assets", [])
 
-            # Find the manual details for this asset
-            manual_assets_dict = self.coordinator.data.get("manual_assets", {})
-            self._manual_details = manual_assets_dict.get(self._asset_id)
-            _LOGGER.debug(f"Asset {self.name}: Fetched YNAB Data = {self._asset_data}")
-            _LOGGER.debug(f"Asset {self.name}: Fetched Manual Details = {self._manual_details}")
+            self._asset_data = self._find_data_by_id(assets, self._asset_id)
+            self._manual_details = self._find_data_by_id(manual_assets, self._asset_id)
 
-            # --- Combined State and Attribute Logic --- NEW/REVISED ---
-            if self._asset_data: # Requires YNAB data to exist
-                # Set Main State (YNAB Value)
+            # Check if we have either YNAB or manual data to proceed
+            if not self._asset_data and not self._manual_details:
+                 _LOGGER.warning(f"Asset {self.name}: No YNAB or Manual data found. Setting unavailable.")
+                 # Keep native_value 0.0, set unavailable
+                 self._attr_extra_state_attributes = {"ynab_id": self._asset_id}
+                 # async_write_ha_state() will be called at the end
+                 return
+
+            # --- YNAB Value Handling ---
+            ynab_value = None # Keep track separately
+            if self._asset_data:
                 ynab_value_milliunits = self._asset_data.get("balance")
                 if isinstance(ynab_value_milliunits, int):
-                    self._attr_native_value = ynab_milliunits_to_float(ynab_value_milliunits)
-                    _LOGGER.debug(f"Asset {self.name}: Set native value (state) to {self._attr_native_value}")
+                    ynab_value = ynab_milliunits_to_float(ynab_value_milliunits)
+                    _LOGGER.debug(f"Asset {self.name}: Found YNAB value {ynab_value}")
                 else:
                     _LOGGER.warning(f"Asset {self.name}: YNAB balance is not an integer: {ynab_value_milliunits}")
-                    self._attr_native_value = None # Explicitly set to None if invalid
+            else:
+                _LOGGER.debug(f"Asset {self.name}: No YNAB data found.")
 
-                # Prepare Extra Attributes
-                linked_entity_id = self._manual_details.get("entity_id") if self._manual_details else None
-                shares_str = self._manual_details.get("shares") if self._manual_details else None
-                last_updated_ts = self._manual_details.get("ynab_value_last_updated_on") if self._manual_details else None
-                shares = None
-                calculated_value = None
 
-                # Calculate value if possible
+            # --- Manual Details & Calculated Value Handling ---
+            linked_entity_id = None
+            shares_str = None
+            last_updated_ts = None
+            shares = None
+            calculated_value = None # Keep track separately
+
+            if self._manual_details:
+                linked_entity_id = self._manual_details.get("entity_id")
+                shares_str = self._manual_details.get("shares")
+                last_updated_ts = self._manual_details.get("ynab_value_last_updated_on")
+
                 if linked_entity_id and shares_str:
                     try:
-                        shares = float(shares_str)
+                        shares = float(shares_str) # Convert to float for calculation
                         if shares <= 0:
                             raise ValueError("Shares must be positive")
 
                         entity_state = self.hass.states.get(linked_entity_id)
                         if entity_state is None:
                             _LOGGER.warning(f"Entity {linked_entity_id} not found for asset {self.name}")
-                            calculated_value = None # Set to None if entity not found
+                        elif entity_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+                             _LOGGER.warning(f"Entity {linked_entity_id} state is '{entity_state.state}' for asset {self.name}")
                         else:
                             try:
                                 current_price = float(entity_state.state)
                                 calculated_value = round(current_price * shares, 2)
+                                _LOGGER.debug(f"Asset {self.name}: Calculated value {calculated_value} ({shares} * {current_price})")
                             except (ValueError, TypeError):
                                 _LOGGER.warning(f"Entity {linked_entity_id} state '{entity_state.state}' is not a valid number for asset {self.name}")
-                                calculated_value = None # Set to None if price invalid
 
                     except (ValueError, TypeError) as e:
                         _LOGGER.warning(f"Invalid shares value '{shares_str}' for asset {self.name}: {e}")
-                        calculated_value = None # Set to None if shares invalid
                     except Exception as e:
-                         _LOGGER.error(f"Unexpected error calculating value for asset {self.name}: {e}")
-                         calculated_value = None # Set to None on unexpected error
+                         _LOGGER.error(f"Unexpected error calculating value for asset {self.name}: {e}", exc_info=True)
                 else:
-                    calculated_value = None # No calculation possible
-
-                # Update attributes dictionary
-                # Start fresh each update to avoid stale attributes if data disappears
-                self._attr_extra_state_attributes = {
-                    "ynab_id": self._asset_id,
-                    "ynab_type": self._asset_data.get("ynab_type", self._asset_data.get("type")), # Use YNAB type if available
-                    "on_budget": self._asset_data.get("on_budget"),
-                    "cleared_balance": ynab_milliunits_to_float(self._asset_data.get("cleared_balance")),
-                    "uncleared_balance": ynab_milliunits_to_float(self._asset_data.get("uncleared_balance")),
-                    "deleted": self._asset_data.get("deleted"),
-                    "linked_entity_id": linked_entity_id,
-                    "shares": shares_str, # Store the raw value from config
-                    "ynab_value": self._attr_native_value, # Use the value we set for the state
-                    "ynab_value_last_updated_on": last_updated_ts,
-                    "calculated_value": calculated_value
-                }
-                # Remove None attributes for cleaner display
-                self._attr_extra_state_attributes = {k: v for k, v in self._attr_extra_state_attributes.items() if v is not None}
-
-                self._attr_available = True # Mark available since we processed data
-                _LOGGER.debug(f"Asset {self.name}: Final attributes = {self._attr_extra_state_attributes}")
-                # --- End Combined Logic ---
-
+                     _LOGGER.debug(f"Asset {self.name}: Not attempting calculation (linked_entity_id: {linked_entity_id}, shares: {shares_str})")
             else:
-                _LOGGER.warning(f"Asset {self.name}: Did not find YNAB data in coordinator update.")
-                # Keep state None and unavailable
+                _LOGGER.debug(f"Asset {self.name}: No manual details found.")
+
+
+            # --- Set State ---
+            # Prioritize calculated_value, fall back to ynab_value, default to 0.0
+            if calculated_value is not None:
+                self._attr_native_value = calculated_value
+                _LOGGER.debug(f"Asset {self.name}: Setting state to calculated_value: {self._attr_native_value}")
+            elif ynab_value is not None:
+                self._attr_native_value = ynab_value
+                _LOGGER.debug(f"Asset {self.name}: Setting state to ynab_value: {self._attr_native_value}")
+            else:
+                # Keep the default 0.0 we set at the start
+                _LOGGER.debug(f"Asset {self.name}: Setting state to default 0.0 (no calculated or ynab value)")
+
+
+            # --- Set Final Attributes ---
+            self._attr_extra_state_attributes = {
+                "ynab_id": self._asset_id,
+                "ynab_type": self._asset_data.get("ynab_type", self._asset_data.get("type")) if self._asset_data else None,
+                "on_budget": self._asset_data.get("on_budget") if self._asset_data else None,
+                "cleared_balance": ynab_milliunits_to_float(self._asset_data.get("cleared_balance")) if self._asset_data else None,
+                "uncleared_balance": ynab_milliunits_to_float(self._asset_data.get("uncleared_balance")) if self._asset_data else None,
+                "deleted": self._asset_data.get("deleted") if self._asset_data else None,
+                "linked_entity_id": linked_entity_id,
+                "shares": shares_str, # Store the raw value from config/manual details
+                "ynab_value": ynab_value, # Store the potentially None ynab value
+                "ynab_value_last_updated_on": last_updated_ts,
+                "calculated_value": calculated_value # Store the potentially None calculated value
+            }
+            # Remove None attributes for cleaner display? Let's keep them for now.
+            # self._attr_extra_state_attributes = {k: v for k, v in self._attr_extra_state_attributes.items() if v is not None}
+
+            self._attr_available = True # Mark available since we processed data
+            _LOGGER.debug(f"Asset {self.name}: Final native value = {self._attr_native_value}")
+            _LOGGER.debug(f"Asset {self.name}: Final attributes = {self._attr_extra_state_attributes}")
+
         else:
             _LOGGER.warning(f"Asset {self.name}: Coordinator data unavailable or not a dict.")
-            # Keep state None and unavailable
+            # Keep native_value 0.0, set unavailable
+            self._attr_extra_state_attributes = {"ynab_id": self._asset_id}
 
         # Write state regardless of availability
-        self.async_write_ha_state()
+        # Add try-except around state write
+        try:
+             _LOGGER.debug(f"Attempting async_write_ha_state for {self.entity_id}")
+             self.async_write_ha_state()
+             _LOGGER.debug(f"Completed async_write_ha_state for {self.entity_id}")
+        except RecursionError: # Catch the specific error
+             _LOGGER.error(f"RecursionError while writing state for {self.entity_id}. State: {self._attr_native_value}, Attrs: {self._attr_extra_state_attributes}", exc_info=True)
+             # If recursion happens even with 0.0, maybe try setting unavailable
+             # if self._attr_available:
+             #     _LOGGER.warning(f"Setting {self.entity_id} to unavailable due to recursion error.")
+             #     self._attr_available = False
+             #     try:
+             #         self.async_write_ha_state()
+             #     except Exception as e_inner:
+             #         _LOGGER.error(f"Error writing unavailable state for {self.entity_id} after recursion: {e_inner}")
+        except Exception as e:
+             _LOGGER.error(f"Error writing state for {self.entity_id}: {e}", exc_info=True)
 
 
 # --- Liability Sensor ---
