@@ -618,7 +618,7 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
                                 calculated_value = round(current_price * shares, 2)
                             except (ValueError, TypeError):
                                 _LOGGER.warning(f"Entity {linked_entity_id} state '{entity_state.state}' is not a valid number for asset {self.name}")
-                                calculated_value = "Invalid Price State"
+                                calculated_value = None
 
                     except (ValueError, TypeError) as e:
                         _LOGGER.warning(f"Invalid shares value '{shares_str}' for asset {self.name}: {e}")
