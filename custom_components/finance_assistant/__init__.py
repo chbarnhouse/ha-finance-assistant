@@ -54,6 +54,7 @@ def async_register_services(hass: HomeAssistant, coordinator):
 
         all_data = coordinator.data
         all_ynab_accounts = all_data.get("accounts", [])
+        all_assets = all_data.get("assets", [])
         manual_assets = all_data.get("manual_assets", {})
         asset_types = all_data.get("asset_types", [])
 
@@ -75,17 +76,17 @@ def async_register_services(hass: HomeAssistant, coordinator):
 
         _LOGGER.debug(f"Found 'Stocks' asset type ID: {stock_type_id}")
 
-        # 2. Filter YNAB accounts to find eligible stock assets
+        # 2. Filter YNAB assets to find eligible stock assets
         assets_to_reconcile = []
-        for acc in all_ynab_accounts:
-            if not isinstance(acc, dict) or acc.get("closed") or acc.get("deleted"):
+        for asset in all_assets:
+            if not isinstance(asset, dict) or asset.get("deleted"):
                 continue
 
-            ynab_account_id = acc.get("id")
-            if not ynab_account_id:
+            ynab_asset_id = asset.get("id")
+            if not ynab_asset_id:
                 continue
 
-            asset_details = manual_assets.get(ynab_account_id)
+            asset_details = manual_assets.get(ynab_asset_id)
             if not asset_details:
                 continue
 
@@ -94,11 +95,24 @@ def async_register_services(hass: HomeAssistant, coordinator):
 
             entity_id = asset_details.get("entity_id")
             shares_str = asset_details.get("shares")
-            current_ynab_balance = acc.get("balance") # Milliunits from YNAB
+            # Use 'balance' which comes from YNAB API for tracking accounts
+            # For assets (like stocks), YNAB API provides 'balance', but our addon might send 'value'
+            # Let's prioritize 'value' if present, otherwise fallback to 'balance'
+            current_ynab_balance_milliunits = asset.get("value") # Prioritize 'value' from addon
+            if current_ynab_balance_milliunits is None:
+                 current_ynab_balance_milliunits = asset.get("balance", 0) # Fallback to 'balance'
+            else:
+                 # If 'value' exists (likely already in dollars), convert to milliunits
+                 try:
+                    current_ynab_balance_milliunits = int(float(current_ynab_balance_milliunits) * 1000)
+                 except (ValueError, TypeError):
+                     _LOGGER.warning(f"Asset {asset.get('name')} has non-numeric 'value': {asset.get('value')}. Using 0 balance.")
+                     current_ynab_balance_milliunits = 0
 
-            if not entity_id or not shares_str or not isinstance(current_ynab_balance, int):
+
+            if not (entity_id and shares_str and isinstance(current_ynab_balance_milliunits, int)):
                 _LOGGER.debug(
-                    f"Skipping asset {acc.get('name')} ({ynab_account_id}): Missing entity_id, shares, or valid YNAB balance."
+                    f"Skipping asset {asset.get('name')} ({ynab_asset_id}): Missing entity_id, shares, or valid YNAB value/balance."
                 )
                 continue
 
@@ -108,17 +122,17 @@ def async_register_services(hass: HomeAssistant, coordinator):
                     raise ValueError("Shares must be positive")
             except (ValueError, TypeError):
                 _LOGGER.warning(
-                    f"Skipping asset {acc.get('name')} ({ynab_account_id}): Invalid shares value '{shares_str}'."
+                    f"Skipping asset {asset.get('name')} ({ynab_asset_id}): Invalid shares value '{shares_str}'."
                 )
                 continue
 
             assets_to_reconcile.append(
                 {
-                    "ynab_account_id": ynab_account_id,
-                    "name": acc.get("name"),
+                    "ynab_account_id": ynab_asset_id,
+                    "name": asset.get("name"),
                     "entity_id": entity_id,
                     "shares": shares,
-                    "ynab_balance_milliunits": current_ynab_balance,
+                    "ynab_balance_milliunits": current_ynab_balance_milliunits,
                 }
             )
 
@@ -130,32 +144,13 @@ def async_register_services(hass: HomeAssistant, coordinator):
             _LOGGER.info("No eligible stock assets found to reconcile.")
             return
 
-        # Get Budget ID and API Client
-        budget_id = coordinator.config_entry.data.get("ynab_budget_id")
-        api_client = await coordinator._get_ynab_client() # Get the ApiClient
-
-        if not budget_id:
-            _LOGGER.error("Cannot reconcile: YNAB Budget ID not found in config entry.")
-            return
-        if not api_client:
-             _LOGGER.error("Cannot reconcile: Could not get YNAB ApiClient from coordinator.")
-             return
-
-        # Import and instantiate TransactionsApi
-        try:
-            from ynab_api.api import transactions_api
-            from ynab_api.model.save_transaction import SaveTransaction
-            from ynab_api.model.save_transactions_wrapper import SaveTransactionsWrapper
-        except ImportError as e:
-            _LOGGER.error(f"Failed to import required YNAB API models: {e}")
-            return
-
-        transactions_api_instance = transactions_api.TransactionsApi(api_client)
-
         # 3. Iterate and reconcile each asset
         successful_updates = 0
         failed_updates = 0
-        today_iso = datetime.now(tz=dt_util.get_default_local_timezone()).date().isoformat()
+        # Need dt_util if used for date calculation
+        # Assuming dt_util is available via hass or standard imports
+        # If not, add: from homeassistant.util import dt as dt_util
+        # today_iso = datetime.now(tz=dt_util.get_default_local_timezone()).date().isoformat() # Not needed if addon handles date
 
         for asset in assets_to_reconcile:
             _LOGGER.debug(f"Reconciling asset: {asset['name']}")
@@ -188,57 +183,44 @@ def async_register_services(hass: HomeAssistant, coordinator):
                 f"Asset: {asset['name']}, HA Price: {current_price}, Shares: {shares}, Calculated Value: {calculated_value_milliunits}, YNAB Value: {current_ynab_balance_milliunits}, Adjustment: {adjustment_milliunits}"
             )
 
-            # Only create transaction if adjustment is >= 1 cent (10 milliunits)
-            if abs(adjustment_milliunits) < 10:
-                 _LOGGER.info(f"Skipping reconciliation for {asset['name']}: Adjustment ({adjustment_milliunits} milliunits) is less than 1 cent.")
-                 # Still mark as updated?
-                 try:
-                    # Update timestamp via addon API
-                    await coordinator._request(
-                        "POST", f"/manual_asset/{ynab_id}/reconciled"
-                    )
-                    _LOGGER.debug(f"Marked asset {asset['name']} as reconciled (no transaction needed).")
-                    # successful_updates += 1 # Don't count as success if no txn?
-                 except Exception as ts_err:
-                     _LOGGER.error(f"Failed to update reconciliation timestamp for {asset['name']} after skipping transaction: {ts_err}")
-                     # Don't count as failure if only timestamp update fails?
-                 continue
-
-            # Create YNAB Transaction
-            try:
-                transaction_payload = SaveTransaction(
-                    account_id=ynab_id,
-                    date=today_iso,
-                    amount=adjustment_milliunits,
-                    payee_name="Market Adjustment",
-                    memo=f"HA Sync: Price={current_price}, Shares={shares}",
-                    cleared=SaveTransaction.ClearedEnum.CLEARED,
-                    approved=True,
-                )
-                wrapper = SaveTransactionsWrapper(transaction=transaction_payload)
-
-                _LOGGER.info(
-                    f"Creating YNAB adjustment transaction for {asset['name']} ({ynab_id}): Amount={adjustment_milliunits}"
-                )
-                await transactions_api_instance.create_transaction(budget_id, wrapper)
-                _LOGGER.info(f"Successfully created adjustment transaction for {asset['name']} in YNAB.")
-
-                # Update reconciliation timestamp via addon API
+            # --- Call Addon API to Create YNAB Transaction ---
+            if adjustment_milliunits != 0:
+                _LOGGER.info(f"Attempting to create adjustment of {adjustment_milliunits} milliunits for {asset['name']} ({ynab_id})")
                 try:
-                    await coordinator._request("POST", f"/manual_asset/{ynab_id}/reconciled")
-                    _LOGGER.info(f"Successfully updated reconciliation timestamp for {asset['name']}.")
-                    successful_updates += 1
-                except Exception as ts_update_err:
-                     _LOGGER.error(f"YNAB transaction created for {asset['name']}, but failed to update reconciliation timestamp in addon: {ts_update_err}")
-                     # Count as success because YNAB was updated, but maybe log prominently?
-                     successful_updates += 1 # Still count YNAB update as success
-                     # Optionally add a specific persistent notification for timestamp failure?
+                    # Use the coordinator's method to make the request
+                    api_response = await coordinator.make_api_request(
+                        method="post",
+                        endpoint="create_adjustment_transaction",
+                        json_data={ # Use json_data for automatic serialization and content-type
+                            "account_id": ynab_id,
+                            "amount": adjustment_milliunits
+                        }
+                        # headers={'Content-Type': 'application/json'} # Not needed when using json_data
+                    )
 
-            except Exception as e:
-                _LOGGER.exception(
-                    f"Failed to create YNAB transaction for asset {asset['name']} ({ynab_id}): {e}"
-                )
-                failed_updates += 1
+                    # Check the response from the addon API
+                    if api_response and isinstance(api_response, dict) and api_response.get("transaction_id"):
+                        _LOGGER.info(
+                            f"Successfully created YNAB adjustment transaction for {asset['name']}. Transaction ID: {api_response.get('transaction_id')}"
+                        )
+                        successful_updates += 1
+                    else:
+                        # Log error if addon reported failure or response was unexpected
+                        error_detail = api_response.get("error", "Unknown error") if isinstance(api_response, dict) else str(api_response)
+                        _LOGGER.error(
+                            f"Failed to create YNAB adjustment for {asset['name']}. Addon API Response: {error_detail}"
+                        )
+                        failed_updates += 1
+
+                except Exception as api_err:
+                    _LOGGER.error(
+                        f"Error calling addon API for {asset['name']} adjustment: {api_err}", exc_info=True
+                    )
+                    failed_updates += 1
+            else:
+                _LOGGER.debug(f"No adjustment needed for {asset['name']}. Skipping YNAB transaction.")
+                successful_updates += 1 # Count as success if no adjustment needed
+            # --- End YNAB Transaction Call ---
 
         # Final Notification
         if failed_updates > 0:
@@ -359,6 +341,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 # --- Need to add YNAB client initialization and access --- NEW ---
 from ynab_api import ApiClient, Configuration
 from ynab_api.api import accounts_api # Import the module
+# Need dt_util if used for date calculation
+from homeassistant.util import dt as dt_util
 
 
 class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
@@ -427,9 +411,8 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         _LOGGER.info("YNAB ApiClient initialized.")
         return self._ynab_client
 
-    async def _request(self, method, endpoint, params=None, data=None, json_data=None):
+    async def _request(self, method, endpoint, params=None, data=None, json_data=None, request_headers=None):
         """Make an API request, trying the appropriate method based on environment."""
-        headers = {}
         last_error = None
         endpoint_clean = endpoint.lstrip('/')
 
@@ -455,11 +438,16 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             secondary_url = None
             secondary_method = "None"
             _LOGGER.debug(f"Dev env detected. Primary: {primary_method}, No Secondary.")
+            # Use provided request_headers, don't override with Supervisor ones
+            headers = request_headers if request_headers is not None else {}
 
         # --- 1. Try Primary Method ---
         if primary_url:
             _LOGGER.debug(f"Attempting {primary_method} API request to: {primary_url}")
-            primary_headers = headers.copy() # Use appropriate headers for primary
+            primary_headers = headers.copy() # Start with base headers
+            if self.supervisor_token and primary_method == "Supervisor": # Only add supervisor token if using supervisor method
+                 primary_headers["Authorization"] = f"Bearer {self.supervisor_token}"
+
             try:
                 async with self.websession.request(
                     method, primary_url, headers=primary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=10)
@@ -503,7 +491,8 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
         # --- 2. Try Secondary Method (if Primary failed and Secondary exists) ---
         if last_error and secondary_url:
             _LOGGER.info(f"Primary method failed ({last_error}). Attempting {secondary_method} API fallback to: {secondary_url}")
-            secondary_headers = {} # Direct fallback doesn't use Supervisor token
+            secondary_headers = request_headers if request_headers is not None else {} # Use provided request_headers for fallback too
+            # Do NOT add supervisor token to direct fallback call
             try:
                 async with self.websession.request(
                     method, secondary_url, headers=secondary_headers, params=params, data=data, json=json_data, timeout=aiohttp.ClientTimeout(total=15)
@@ -567,31 +556,72 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch data from the Finance Assistant addon API."""
         _LOGGER.debug("Coordinator: Starting data update...")
+        combined_data = {} # Initialize empty dict for combined results
         try:
-            # Call the /api/all_data endpoint
-            raw_data = await self._request("GET", "/all_data")
-            _LOGGER.debug(f"Coordinator: Received raw data from addon: {str(raw_data)[:1000]}...") # Log raw data
+            # Fetch main data and config data concurrently
+            main_data_task = self._request("GET", "/all_data")
+            config_data_task = self._request("GET", "/config")
 
-            if not isinstance(raw_data, dict):
-                 _LOGGER.error(f"Coordinator: Received non-dict data from addon. Type: {type(raw_data)}")
-                 return self.data # Return previous data on error
+            main_data, config_data = await asyncio.gather(
+                main_data_task,
+                config_data_task,
+                return_exceptions=True # Allow individual tasks to fail without stopping others
+            )
 
-            # --- Perform basic data validation --- NEW --- (Added for troubleshooting)
+            # --- Handle Main Data --- #
+            if isinstance(main_data, Exception):
+                 _LOGGER.error(f"Coordinator: Error fetching main data from /all_data: {main_data}")
+                 # Depending on severity, maybe raise UpdateFailed or return previous?
+                 # For now, return previous data if main data fails critically.
+                 raise UpdateFailed(f"Failed to fetch main data: {main_data}") from main_data
+            elif not isinstance(main_data, dict):
+                 _LOGGER.error(f"Coordinator: Received non-dict main data from /all_data. Type: {type(main_data)}")
+                 raise UpdateFailed("Received invalid main data format.")
+            else:
+                 _LOGGER.debug(f"Coordinator: Received main data keys: {list(main_data.keys())}")
+                 combined_data.update(main_data) # Add main data to combined dict
+
+            # --- Handle Config Data --- #
+            if isinstance(config_data, Exception):
+                 _LOGGER.warning(f"Coordinator: Error fetching config data from /config: {config_data}. Using default/last known config.")
+                 # Use last known config if available, otherwise default to empty dict
+                 combined_data['config'] = self.data.get('config', {}) if self.data else {}
+            elif not isinstance(config_data, dict):
+                 _LOGGER.warning(f"Coordinator: Received non-dict config data from /config. Type: {type(config_data)}. Using default/last known config.")
+                 combined_data['config'] = self.data.get('config', {}) if self.data else {}
+            else:
+                 _LOGGER.debug(f"Coordinator: Received config data: {config_data}")
+                 combined_data['config'] = config_data # Add config data under the 'config' key
+
+            # --- Perform basic data validation on main data (optional) ---
             expected_keys = ["accounts", "assets", "liabilities", "credit_cards", "transactions", "scheduled_transactions"]
-            missing_keys = [key for key in expected_keys if key not in raw_data]
+            missing_keys = [key for key in expected_keys if key not in combined_data]
             if missing_keys:
-                 _LOGGER.warning(f"Coordinator: Data received from addon is missing expected keys: {missing_keys}")
-                 # Decide if this is critical - maybe still return partial data?
-                 # For now, log and return raw_data, sensors will handle missing keys
-            # --- End basic data validation --- NEW ---
+                 _LOGGER.warning(f"Coordinator: Combined data is missing expected main keys: {missing_keys}")
+                 # Still return partial data
+            # --- End basic data validation ---
 
-            # Return the fetched data dictionary
-            _LOGGER.debug(f"Coordinator: Successfully fetched and returning data with keys: {list(raw_data.keys())}")
-            return raw_data
+            # Return the combined data dictionary
+            _LOGGER.debug(f"Coordinator: Successfully fetched and returning combined data with keys: {list(combined_data.keys())}")
+            return combined_data
 
         except aiohttp.ClientConnectorError as conn_err:
             _LOGGER.error(f"Coordinator: Connection error fetching data: {conn_err}")
-            return self.data # Return previous data on connection error
+            raise UpdateFailed(f"Connection error: {conn_err}") from conn_err
+        except UpdateFailed: # Re-raise UpdateFailed if thrown above
+             raise
         except Exception as e:
-            _LOGGER.error(f"Coordinator: Unexpected error fetching data: {e}", exc_info=True)
-            return self.data # Return previous data on other errors
+            _LOGGER.error(f"Coordinator: Unexpected error during data update: {e}", exc_info=True)
+            raise UpdateFailed(f"Unexpected error: {e}") from e
+
+    async def make_api_request(self, method, endpoint, params=None, data=None, json_data=None, headers=None):
+        """Helper method to make API requests using the internal _request logic."""
+        # Ensure headers is a dict if None
+        request_headers = headers if headers is not None else {}
+
+        # If json_data is provided, ensure Content-Type is set correctly
+        if json_data is not None and 'Content-Type' not in request_headers:
+             request_headers['Content-Type'] = 'application/json'
+
+        # Call the internal request method
+        return await self._request(method, endpoint, params=params, data=data, json_data=json_data, request_headers=request_headers)

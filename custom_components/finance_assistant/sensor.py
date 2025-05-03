@@ -9,6 +9,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_ATTRIBUTION,
     CURRENCY_DOLLAR,
+    STATE_UNKNOWN, # Import STATE_UNKNOWN
+    STATE_UNAVAILABLE, # Import STATE_UNAVAILABLE
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -256,7 +258,6 @@ def safe_parse_ynab_date(date_str: str) -> Optional[date]:
     except ValueError:
         try:
             # Try RFC 1123 format (e.g., "Fri, 10 Nov 2023 00:00:00 GMT")
-            # This might need adjustment based on the exact format observed
             # Python's %Z directive behavior can vary. Consider dateutil if needed.
             parsed_dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
             # Convert to local timezone if necessary, though YNAB dates are usually just dates
@@ -335,9 +336,13 @@ class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
             self._attr_available = False
             return
 
+        # Fetch addon config from coordinator data
+        addon_config = self.coordinator.data.get("config", {}) if self.coordinator.data else {}
+        include_ynab_emoji = addon_config.get("include_ynab_emoji", True) # Default to True if missing
+
         accounts = self.coordinator.data.get("accounts", [])
         if not isinstance(accounts, list):
-            _LOGGER.warning(f"\'accounts\' data is not a list for account {self._account_id}")
+            _LOGGER.warning(f"'accounts' data is not a list for account {self._account_id}")
             self._attr_available = False
             return
 
@@ -357,6 +362,12 @@ class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
             manual_bank_name = account_data.get("bank")
             include_bank = account_data.get("include_bank_in_name", True) # Default true if missing
             base_name = account_data.get("name", self._original_name) # Fallback to original name
+
+            # Conditionally remove emoji and space
+            if not include_ynab_emoji and len(base_name) > 1 and not base_name[0].isalnum():
+                 # Basic check: If first char isn't alphanumeric, assume it's emoji
+                 # A more robust check might use regex for emojis: r"^(\U0001F[0-9A-F]{3}|\U000E00[0-9A-F]{2}|\uD83C[\uDDE6-\uDDFF]|\uD83D[\uDC00-\uDE4F\uDE80-\uDEC5]|\uD83E[\uDD00-\uDFFF]|[\u2600-\u27BF])\s"
+                 base_name = base_name[2:]
 
             if include_bank and manual_bank_name:
                 self._attr_name = f"{manual_bank_name} {base_name}"
@@ -440,6 +451,7 @@ class FinanceAssistantAccountSensor(FinanceAssistantBaseSensor):
             # self.async_write_ha_state()
 
 
+# --- Start Replace FinanceAssistantAssetSensor ---
 class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
     """Implementation of a YNAB asset sensor."""
 
@@ -470,21 +482,30 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
         }
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{asset_id}"
         self._attr_device_info = device_info # Set device info
-        self._attr_has_entity_name = True
         self._attr_name = asset_name
+        self._attr_native_value = 0.0 # Initialize native value
 
         _LOGGER.debug(f"AssetSensor initialized: ID={asset_id}, Name={asset_name}")
+
+    @property
+    def state(self):
+        """Return the formatted state, ensuring it's always a string."""
+        if self._attr_native_value is None:
+            # Even though _handle_coordinator_update defaults to 0.0,
+            # add a safeguard here.
+            return "0.00"
+        try:
+            # Format the native value to a string with 2 decimal places
+            return f"{float(self._attr_native_value):.2f}"
+        except (ValueError, TypeError):
+            _LOGGER.warning(f"Could not format state for asset {self._attr_name}: {self._attr_native_value}")
+            return "0.00" # Fallback string representation
 
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
         await super().async_added_to_hass()
         # Initial update using cached coordinator data
         self._handle_coordinator_update()
-
-    def state(self):
-        """Return the state (balance)."""
-        # The native value is set in _handle_coordinator_update
-        return self._attr_native_value
 
     def _find_data_by_id(self, data_list, target_id):
         """Helper to find the specific asset data by ID."""
@@ -495,135 +516,176 @@ class FinanceAssistantAssetSensor(FinanceAssistantBaseSensor):
         _LOGGER.debug(f"Handling coordinator update for asset: {self._attr_name}")
 
         # Initialize with a default numeric state to potentially avoid recursion
+        # NOTE: native_value is primarily set here, state property formats it.
         self._attr_native_value = 0.0
         self._attr_available = False # Default to unavailable
 
         if self.coordinator.data and isinstance(self.coordinator.data, dict):
             assets = self.coordinator.data.get("assets", [])
-            manual_assets = self.coordinator.data.get("manual_assets", [])
+            manual_assets = self.coordinator.data.get("manual_assets", {}) # Default to empty dict
 
             self._asset_data = self._find_data_by_id(assets, self._asset_id)
-            self._manual_details = self._find_data_by_id(manual_assets, self._asset_id)
+            # Directly access the manual_assets dictionary using the asset ID
+            self._manual_details = manual_assets.get(self._asset_id)
 
             # Check if we have either YNAB or manual data to proceed
             if not self._asset_data and not self._manual_details:
                  _LOGGER.warning(f"Asset {self.name}: No YNAB or Manual data found. Setting unavailable.")
                  # Keep native_value 0.0, set unavailable
                  self._attr_extra_state_attributes = {"ynab_id": self._asset_id}
-                 # async_write_ha_state() will be called at the end
-                 return
+                 # No return here, let the final block handle writing state
+            else:
+                # --- YNAB Value Handling ---
+                ynab_value = None # Keep track separately
+                last_updated_ts = None # Keep track of timestamp
+                if self._asset_data:
+                    # Look for the 'value' key provided by the backend API
+                    # The backend already converted this from milliunits
+                    ynab_value_from_api = self._asset_data.get("value")
+                    if isinstance(ynab_value_from_api, (int, float)): # Check if it's a number
+                        ynab_value = float(ynab_value_from_api)
+                        _LOGGER.debug(f"Asset {self.name}: Found YNAB value from API: {ynab_value}")
+                    elif ynab_value_from_api is None:
+                        # If 'value' is explicitly None or missing in the API data
+                        _LOGGER.debug(f"Asset {self.name}: YNAB value field is None or missing in API data.")
+                    else:
+                        # If 'value' exists but is not a number
+                        _LOGGER.warning(f"Asset {self.name}: YNAB value from API is not a number: {ynab_value_from_api}")
 
-            # --- YNAB Value Handling ---
-            ynab_value = None # Keep track separately
-            if self._asset_data:
-                ynab_value_milliunits = self._asset_data.get("balance")
-                if isinstance(ynab_value_milliunits, int):
-                    ynab_value = ynab_milliunits_to_float(ynab_value_milliunits)
-                    _LOGGER.debug(f"Asset {self.name}: Found YNAB value {ynab_value}")
+                    # Get the last updated timestamp from YNAB data
+                    last_updated_ts = self._asset_data.get("ynab_value_last_updated_on") # <-- READ FROM ASSET DATA
+                    _LOGGER.debug(f"Asset {self.name}: Found YNAB last updated timestamp: {last_updated_ts}")
+
                 else:
-                    _LOGGER.warning(f"Asset {self.name}: YNAB balance is not an integer: {ynab_value_milliunits}")
-            else:
-                _LOGGER.debug(f"Asset {self.name}: No YNAB data found.")
+                    _LOGGER.debug(f"Asset {self.name}: No YNAB data found.")
 
 
-            # --- Manual Details & Calculated Value Handling ---
-            linked_entity_id = None
-            shares_str = None
-            last_updated_ts = None
-            shares = None
-            calculated_value = None # Keep track separately
+                # --- Manual Details & Calculated Value Handling ---
+                linked_entity_id = None
+                shares_str = None
+                # last_updated_ts = None # We now get this from _asset_data
+                shares = None
+                calculated_value = None # Keep track separately
 
-            if self._manual_details:
-                linked_entity_id = self._manual_details.get("entity_id")
-                shares_str = self._manual_details.get("shares")
-                last_updated_ts = self._manual_details.get("ynab_value_last_updated_on")
+                if self._manual_details:
+                    linked_entity_id = self._manual_details.get("entity_id")
+                    shares_str = self._manual_details.get("shares")
+                    # last_updated_ts = self._manual_details.get("ynab_value_last_updated_on") # <-- REMOVE THIS LINE
 
-                if linked_entity_id and shares_str:
-                    try:
-                        shares = float(shares_str) # Convert to float for calculation
-                        if shares <= 0:
-                            raise ValueError("Shares must be positive")
+                    if linked_entity_id and shares_str:
+                        try:
+                            shares = float(shares_str) # Convert to float for calculation
+                            if shares <= 0:
+                                raise ValueError("Shares must be positive")
 
-                        entity_state = self.hass.states.get(linked_entity_id)
-                        if entity_state is None:
-                            _LOGGER.warning(f"Entity {linked_entity_id} not found for asset {self.name}")
-                        elif entity_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-                             _LOGGER.warning(f"Entity {linked_entity_id} state is '{entity_state.state}' for asset {self.name}")
-                        else:
-                            try:
-                                current_price = float(entity_state.state)
-                                calculated_value = round(current_price * shares, 2)
-                                _LOGGER.debug(f"Asset {self.name}: Calculated value {calculated_value} ({shares} * {current_price})")
-                            except (ValueError, TypeError):
-                                _LOGGER.warning(f"Entity {linked_entity_id} state '{entity_state.state}' is not a valid number for asset {self.name}")
+                            entity_state = self.hass.states.get(linked_entity_id)
+                            if entity_state is None:
+                                _LOGGER.warning(f"Entity {linked_entity_id} not found for asset {self.name}")
+                            elif entity_state.state == STATE_UNAVAILABLE:
+                                _LOGGER.debug(
+                                    "Entity %s state is unavailable for asset %s",
+                                    linked_entity_id,
+                                    self._asset_data.get("name", "Unknown Asset") if self._asset_data else self._original_name, # Handle no asset data
+                                )
+                            elif entity_state.state == STATE_UNKNOWN:
+                                _LOGGER.debug(
+                                    "Entity %s state is 'unknown' for asset %s",
+                                    linked_entity_id,
+                                    self._asset_data.get("name", "Unknown Asset") if self._asset_data else self._original_name, # Handle no asset data
+                                )
+                            else:
+                                try:
+                                    current_price = float(entity_state.state)
+                                    calculated_value = round(current_price * shares, 2)
+                                    _LOGGER.debug(f"Asset {self.name}: Calculated value {calculated_value} ({shares} * {current_price})")
+                                except (ValueError, TypeError):
+                                    # Entity state is not a valid number
+                                    _LOGGER.debug(
+                                        "Entity %s state '%s' is not a valid number for asset %s",
+                                        linked_entity_id,
+                                        entity_state.state,
+                                        self._asset_data.get("name", "Unknown Asset") if self._asset_data else self._original_name, # Handle no asset data
+                                    )
 
-                    except (ValueError, TypeError) as e:
-                        _LOGGER.warning(f"Invalid shares value '{shares_str}' for asset {self.name}: {e}")
-                    except Exception as e:
-                         _LOGGER.error(f"Unexpected error calculating value for asset {self.name}: {e}", exc_info=True)
+                        except (ValueError, TypeError) as e:
+                            _LOGGER.warning(f"Invalid shares value '{shares_str}' for asset {self.name}: {e}")
+                        except Exception as e:
+                             _LOGGER.error(f"Unexpected error calculating value for asset {self.name}: {e}", exc_info=True)
+                    else:
+                         _LOGGER.debug(f"Asset {self.name}: Not attempting calculation (linked_entity_id: {linked_entity_id}, shares: {shares_str}) ")
                 else:
-                     _LOGGER.debug(f"Asset {self.name}: Not attempting calculation (linked_entity_id: {linked_entity_id}, shares: {shares_str})")
-            else:
-                _LOGGER.debug(f"Asset {self.name}: No manual details found.")
+                    _LOGGER.debug(f"Asset {self.name}: No manual details found.")
 
 
-            # --- Set State ---
-            # Prioritize calculated_value, fall back to ynab_value, default to 0.0
-            if calculated_value is not None:
-                self._attr_native_value = calculated_value
-                _LOGGER.debug(f"Asset {self.name}: Setting state to calculated_value: {self._attr_native_value}")
-            elif ynab_value is not None:
-                self._attr_native_value = ynab_value
-                _LOGGER.debug(f"Asset {self.name}: Setting state to ynab_value: {self._attr_native_value}")
-            else:
-                # Keep the default 0.0 we set at the start
-                _LOGGER.debug(f"Asset {self.name}: Setting state to default 0.0 (no calculated or ynab value)")
+                # --- Set Native Value ---
+                # Prioritize calculated_value, fall back to ynab_value, default to 0.0
+
+                # Get the preference from coordinator config
+                use_calculated = False # Default preference
+                if self.coordinator.data and isinstance(self.coordinator.data.get("config"), dict):
+                    use_calculated = self.coordinator.data["config"].get("use_calculated_asset_value", False)
+                    _LOGGER.debug(f"Asset {self.name}: use_calculated_asset_value setting = {use_calculated}")
+                else:
+                    _LOGGER.warning(f"Asset {self.name}: Could not find 'config' or 'use_calculated_asset_value' in coordinator data. Defaulting to False.")
+
+                # Set native value based on preference
+                if use_calculated and calculated_value is not None:
+                    self._attr_native_value = calculated_value
+                    _LOGGER.debug(f"Asset {self.name}: Using calculated_value ({calculated_value}) based on setting.")
+                elif ynab_value is not None:
+                    self._attr_native_value = ynab_value
+                    _LOGGER.debug(f"Asset {self.name}: Using ynab_value ({ynab_value}) as fallback or setting preference.")
+                else:
+                    self._attr_native_value = 0.0 # Final fallback
+                    _LOGGER.debug(f"Asset {self.name}: Setting native value to default 0.0 (no calculated or YNAB value available).")
 
 
-            # --- Set Final Attributes ---
-            self._attr_extra_state_attributes = {
-                "ynab_id": self._asset_id,
-                "ynab_type": self._asset_data.get("ynab_type", self._asset_data.get("type")) if self._asset_data else None,
-                "on_budget": self._asset_data.get("on_budget") if self._asset_data else None,
-                "cleared_balance": ynab_milliunits_to_float(self._asset_data.get("cleared_balance")) if self._asset_data else None,
-                "uncleared_balance": ynab_milliunits_to_float(self._asset_data.get("uncleared_balance")) if self._asset_data else None,
-                "deleted": self._asset_data.get("deleted") if self._asset_data else None,
-                "linked_entity_id": linked_entity_id,
-                "shares": shares_str, # Store the raw value from config/manual details
-                "ynab_value": ynab_value, # Store the potentially None ynab value
-                "ynab_value_last_updated_on": last_updated_ts,
-                "calculated_value": calculated_value # Store the potentially None calculated value
-            }
-            # Remove None attributes for cleaner display? Let's keep them for now.
-            # self._attr_extra_state_attributes = {k: v for k, v in self._attr_extra_state_attributes.items() if v is not None}
+                # --- Set Final Attributes ---
+                self._attr_extra_state_attributes = {
+                    "ynab_id": self._asset_id,
+                    "ynab_type": self._asset_data.get("ynab_type", self._asset_data.get("type")) if self._asset_data else None,
+                    "on_budget": self._asset_data.get("on_budget") if self._asset_data else None,
+                    "deleted": self._asset_data.get("deleted") if self._asset_data else None,
+                    "linked_entity_id": linked_entity_id,
+                    "shares": shares_str, # Store the raw value from config/manual details
+                    "ynab_value": ynab_value, # Store the potentially None ynab value
+                    "ynab_value_last_updated_on": last_updated_ts, # Store timestamp from YNAB data
+                    "calculated_value": calculated_value # Store the potentially None calculated value
+                }
+                # Filter out None values from attributes AFTER setting them all
+                self._attr_extra_state_attributes = {k: v for k, v in self._attr_extra_state_attributes.items() if v is not None}
 
-            self._attr_available = True # Mark available since we processed data
-            _LOGGER.debug(f"Asset {self.name}: Final native value = {self._attr_native_value}")
-            _LOGGER.debug(f"Asset {self.name}: Final attributes = {self._attr_extra_state_attributes}")
+                self._attr_available = True # Mark available since we processed some data
+                _LOGGER.debug(f"Asset {self.name}: Final native value = {self._attr_native_value}")
+                _LOGGER.debug(f"Asset {self.name}: Final attributes = {self._attr_extra_state_attributes}")
 
         else:
             _LOGGER.warning(f"Asset {self.name}: Coordinator data unavailable or not a dict.")
-            # Keep native_value 0.0, set unavailable
+            # Keep native_value 0.0, availability False
             self._attr_extra_state_attributes = {"ynab_id": self._asset_id}
 
         # Write state regardless of availability
-        # Add try-except around state write
         try:
-             _LOGGER.debug(f"Attempting async_write_ha_state for {self.entity_id}")
+             # Log state value being used by the property override
+             log_state = self.state
+             _LOGGER.debug(f"Attempting async_write_ha_state for {self.entity_id} (State property returns: '{log_state}')")
              self.async_write_ha_state()
              _LOGGER.debug(f"Completed async_write_ha_state for {self.entity_id}")
         except RecursionError: # Catch the specific error
-             _LOGGER.error(f"RecursionError while writing state for {self.entity_id}. State: {self._attr_native_value}, Attrs: {self._attr_extra_state_attributes}", exc_info=True)
-             # If recursion happens even with 0.0, maybe try setting unavailable
-             # if self._attr_available:
-             #     _LOGGER.warning(f"Setting {self.entity_id} to unavailable due to recursion error.")
-             #     self._attr_available = False
-             #     try:
-             #         self.async_write_ha_state()
-             #     except Exception as e_inner:
-             #         _LOGGER.error(f"Error writing unavailable state for {self.entity_id} after recursion: {e_inner}")
+             _LOGGER.error(f"RecursionError while writing state for {self.entity_id}. State property: '{self.state}', Attrs: {self._attr_extra_state_attributes}", exc_info=True)
+             # If recursion happens even with explicit state, something deeper is wrong.
+             # Maybe try setting unavailable?
+             if self._attr_available:
+                 _LOGGER.warning(f"Setting {self.entity_id} to unavailable due to recursion error.")
+                 self._attr_available = False
+                 try:
+                     # Attempt to write just the unavailable state
+                     self.async_write_ha_state()
+                 except Exception as e_inner:
+                     _LOGGER.error(f"Error writing unavailable state for {self.entity_id} after recursion: {e_inner}")
         except Exception as e:
              _LOGGER.error(f"Error writing state for {self.entity_id}: {e}", exc_info=True)
+# --- End Replace FinanceAssistantAssetSensor ---
 
 
 # --- Liability Sensor ---
@@ -643,7 +705,7 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_liability_{liability_id}"
         self._attr_name = liability_name
         self._attr_device_info = device_info
-        self._attr_native_value = None
+        self._attr_native_value = 0.0 # Initialize to 0.0 instead of None
         self._attr_extra_state_attributes = {}
         self._original_name = liability_name
         self._last_liability_data = None
@@ -684,7 +746,7 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
 
             new_attributes = {
                 "ynab_id": liability_data.get("id"),
-                "ynab_type": liability_data.get("type"),
+                "ynab_type": liability_data.get("ynab_type", liability_data.get("type")), # Prefer ynab_type if available
                 "liability_type": liability_data.get("liability_type"), # Manual type
                 "bank": liability_data.get("bank"), # Manual bank
                 "on_budget": liability_data.get("on_budget"),
@@ -692,7 +754,7 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
                 "cleared_balance": ynab_milliunits_to_float(liability_data.get("cleared_balance")),
                 "uncleared_balance": ynab_milliunits_to_float(liability_data.get("uncleared_balance")),
                 "transfer_payee_id": liability_data.get("transfer_payee_id"),
-                "last_reconciled_at": liability_data.get("last_reconciled_at"),
+                "last_reconciled_at": liability_data.get("ynab_value_last_updated_on", liability_data.get("last_reconciled_at")), # Get reconciled time
                 "deleted": liability_data.get("deleted"),
                 "starting_balance": liability_data.get("starting_balance"),
                 "start_date": liability_data.get("start_date"),
@@ -702,6 +764,7 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
                 "debt_interest_rates": liability_data.get("debt_interest_rates"),
                 "debt_minimum_payments": liability_data.get("debt_minimum_payments"),
                 "debt_escrow_amounts": liability_data.get("debt_escrow_amounts"),
+                "notes": liability_data.get("notes"), # Use combined field
             }
             self._attr_extra_state_attributes = {k: v for k, v in new_attributes.items() if v is not None}
             self._attr_available = True
@@ -728,18 +791,9 @@ class FinanceAssistantLiabilitySensor(FinanceAssistantBaseSensor):
 
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
-        if not self.coordinator.data or "liabilities" not in self.coordinator.data:
-            return
-
-        liabilities_list = self.coordinator.data.get("liabilities", [])
-        if not isinstance(liabilities_list, list):
-            return
-
-        liability_data = next((item for item in liabilities_list if item.get('id') == self._liability_id), None)
-
-        if liability_data:
-            self._update_internal_state(liability_data.get('name', 'Unknown Liability'))
-            self.async_write_ha_state()
+        # This method should only trigger an update of the sensor's state.
+        # The actual calculation happens in the state property.
+        self.async_write_ha_state()
 
 
 # --- Credit Card Sensor ---
@@ -759,7 +813,7 @@ class FinanceAssistantCreditCardSensor(FinanceAssistantBaseSensor):
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_credit_card_{card_id}"
         self._attr_name = card_name
         self._attr_device_info = device_info
-        self._attr_native_value = None
+        self._attr_native_value = 0.0 # Initialize to 0.0 instead of None
         self._attr_extra_state_attributes = {}
         self._original_name = card_name
         self._last_card_data = None
@@ -825,11 +879,19 @@ class FinanceAssistantCreditCardSensor(FinanceAssistantBaseSensor):
                 "cleared_balance": ynab_milliunits_to_float(card_data.get("cleared_balance")),
                 "uncleared_balance": ynab_milliunits_to_float(card_data.get("uncleared_balance")),
                 "transfer_payee_id": card_data.get("transfer_payee_id"),
-                "last_reconciled_at": card_data.get("last_reconciled_at"),
+                "last_reconciled_at": card_data.get("ynab_value_last_updated_on", card_data.get("last_reconciled_at")), # Get reconciled time
                 "deleted": card_data.get("deleted"),
                 # Basic Reward Info (more complex structure later)
                 "reward_structure_type": card_data.get("reward_structure_type"),
                 "base_rate": card_data.get("base_rate"),
+                # Added fields from backend
+                "reward_system": card_data.get("reward_system"),
+                "points_program": card_data.get("points_program"),
+                "static_rewards": card_data.get("static_rewards"),
+                "rotating_rules": card_data.get("rotating_rules"),
+                "dynamic_tiers": card_data.get("dynamic_tiers"),
+                "rotation_period": card_data.get("rotation_period"),
+                "activation_period": card_data.get("activation_period"),
             }
             self._attr_extra_state_attributes = {k: v for k, v in new_attributes.items() if v is not None}
             self._attr_available = True
@@ -998,7 +1060,9 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
         # Handle unexpected None for non-date sensors or other invalid types
         elif value is None:
              _LOGGER.warning(f"Got unexpected None value for non-date sensor {key}. Returning default.")
-             return self._default_state() # Return default state string representation
+             # Correction: Call _default_state() to get the default value, then format that
+             default_val = self._default_state()
+             return self._format_state(default_val)
         else:
              _LOGGER.warning(f"Unexpected value type ({type(value)}) for formatting sensor {key}. Value: {value}")
              # Return default state string representation
@@ -1033,7 +1097,8 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
                 return datetime.strptime(date_str, '%Y-%m-%d').date()
             except ValueError:
                 try:
-                    dt_obj = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S GMT')
+                    # Use timezone-naive parsing for GMT offset, as %Z is unreliable
+                    dt_obj = datetime.strptime(date_str[:-4], '%a, %d %b %Y %H:%M:%S')
                     return dt_obj.date()
                 except ValueError:
                     _LOGGER.debug(f"Could not parse date string in known formats: {date_str}", exc_info=True)
@@ -1063,10 +1128,8 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
                 active_cards = [c for c in credit_cards if isinstance(c, dict) and not c.get("closed")]
                 balance = sum(ynab_milliunits_to_float(c.get("balance")) for c in active_cards if isinstance(c, dict)) # Added check
             else:
-                # Should not happen, but return default numeric
                  _LOGGER.warning(f"_calculate_ynab_balances called for unexpected key: {self._sensor_key}")
                  return 0.0
-            # Ensure result is always float
             return float(round(balance, 2))
         except Exception as e:
              _LOGGER.error(f"Error in _calculate_ynab_balances for {self._sensor_key}: {e}", exc_info=True)
@@ -1082,11 +1145,9 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
             if self._sensor_key == "transactions_today_inflow":
                 amounts = [ynab_milliunits_to_float(t.get("amount")) for t in transactions if isinstance(t, dict) and safe_parse_ynab_date(t.get("date")) == today and t.get("amount", 0) > 0]
             elif self._sensor_key == "transactions_today_outflow":
-                # Check t is dict before accessing keys
                 amounts = [ynab_milliunits_to_float(t.get("amount")) for t in transactions if isinstance(t, dict) and safe_parse_ynab_date(t.get("date")) == today and t.get("amount", 0) < 0]
                 return float(round(abs(sum(amounts)), 2))
             elif self._sensor_key == "transactions_today_net":
-                # Check t is dict before accessing keys
                 amounts = [ynab_milliunits_to_float(t.get("amount")) for t in transactions if isinstance(t, dict) and safe_parse_ynab_date(t.get("date")) == today]
             else:
                 _LOGGER.warning(f"_calculate_today_transactions called for unexpected key: {self._sensor_key}")
@@ -1108,10 +1169,10 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
             relevant_key_part = self._sensor_key.replace(f"scheduled_next_{days}_days_", "")
 
             for st in scheduled_transactions:
-                 if not isinstance(st, dict): continue # Skip non-dict items
+                 if not isinstance(st, dict): continue
                  next_date = safe_parse_ynab_date(st.get("date_next"))
                  if next_date and today <= next_date < end_date:
-                     amount = ynab_milliunits_to_float(st.get("amount")) # Handles None
+                     amount = ynab_milliunits_to_float(st.get("amount"))
                      if relevant_key_part == "inflow" and amount > 0:
                          amounts.append(amount)
                      elif relevant_key_part == "outflow" and amount < 0:
@@ -1143,7 +1204,6 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
             for st in scheduled_transactions:
                  if not isinstance(st, dict): continue
                  next_date = safe_parse_ynab_date(st.get("date_next"))
-                 # Check date validity and amount sign
                  if next_date is not None and next_date >= today and sign_filter(st.get("amount", 0)):
                      valid_scheduled_tx.append(st)
 
@@ -1158,7 +1218,7 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
 
             if "date" in self._sensor_key:
                 parsed_date = safe_parse_ynab_date(next_tx.get("date_next"))
-                return parsed_date # Returns None if parsing fails inside, handled by _format_state
+                return parsed_date
             else: # amount
                 amount = ynab_milliunits_to_float(next_tx.get("amount"))
                 result = abs(amount) if "outflow" in self._sensor_key else amount
@@ -1173,7 +1233,6 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
         total_outflow = 0.0 # Default
 
         try:
-            # Find next inflow date safely
             next_inflow_date = None
             valid_inflow_tx = []
             for st in scheduled_transactions:
@@ -1192,12 +1251,10 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
             if not next_inflow_date:
                 return 0.0 # No upcoming inflow
 
-            # Sum outflows before that date
             outflow_amounts = []
             for st in scheduled_transactions:
                 if not isinstance(st, dict): continue
                 next_date = safe_parse_ynab_date(st.get("date_next"))
-                # Check date validity, range, and amount sign
                 if next_date and today <= next_date < next_inflow_date and st.get("amount", 0) < 0:
                      outflow_amounts.append(ynab_milliunits_to_float(st.get("amount")))
 
@@ -1212,20 +1269,15 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
         try:
             liquid_cash = self._calculate_ynab_balances_for_key("ynab_cash_liquid")
             credit_balance = self._calculate_ynab_balances_for_key("ynab_credit_balance")
-            # Ensure comparison with numeric types
             if isinstance(liquid_cash, (int, float)) and isinstance(credit_balance, (int, float)):
-                 # Positive credit balance means debt, so we check if cash >= debt
-                 # Note: YNAB balance for CC is negative for debt, positive for overpayment.
-                 # So check if liquid_cash + credit_balance >= 0
                  return (liquid_cash + credit_balance) >= 0
             else:
                  _LOGGER.warning("Could not calculate can_pay_off_cards due to non-numeric inputs.")
-                 return False # Default to False if inputs are invalid
+                 return False
         except Exception as e:
              _LOGGER.error(f"Error in _calculate_can_pay_off_cards: {e}", exc_info=True)
              return False # Default to False on error
 
-    # Helper to call calculation logic internally without recursive state calls
     def _calculate_ynab_balances_for_key(self, key):
         original_key = self._sensor_key
         self._sensor_key = key
@@ -1237,21 +1289,15 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
     @property
     def available(self) -> bool:
         """Return if entity is available based on the data it needs."""
-        # Basic availability check
         if not self.coordinator.last_update_success or self.coordinator.data is None:
             return False
 
-        # For transaction-based sensors, availability depends on having transaction data
         if self._sensor_key.startswith("transaction_") and not self._has_transaction_data():
-            # Still report as available but with zero values
             return True
 
-        # For scheduled transaction-based sensors
         if self._sensor_key.startswith("scheduled_") and not self._has_scheduled_transaction_data():
-            # Still report as available but with zero values
             return True
 
-        # For account-based sensors, check if we have accounts data
         if self._sensor_key.startswith("ynab_") and "accounts" not in self.coordinator.data:
             return False
 
@@ -1261,28 +1307,24 @@ class FinanceAssistantSummarySensor(FinanceAssistantBaseSensor):
         """Check if we have transaction data available."""
         if not self.coordinator.data:
             return False
-
-        # Check if transactions key exists and has content
         if "transactions" not in self.coordinator.data or not self.coordinator.data["transactions"]:
             if self._sensor_key.startswith("transaction_"):
-                _LOGGER.warning(f"Transaction data not available for {self._sensor_key}. "
-                              f"This may be due to a YNAB API change. The sensor will show zero values.")
+                _LOGGER.warning(f"Transaction data not available for {self._sensor_key}. This may be due to a YNAB API change. The sensor will show zero values.")
             return False
-
         return True
 
     def _has_scheduled_transaction_data(self):
         """Check if we have scheduled transaction data available."""
         if not self.coordinator.data:
             return False
-
-        # Check if scheduled_transactions key exists and has content
         if "scheduled_transactions" not in self.coordinator.data or not self.coordinator.data["scheduled_transactions"]:
             if self._sensor_key.startswith("scheduled_"):
-                _LOGGER.warning(f"Scheduled transaction data not available for {self._sensor_key}. "
-                              f"This may be due to a YNAB API change. The sensor will show zero values.")
+                _LOGGER.warning(f"Scheduled transaction data not available for {self._sensor_key}. This may be due to a YNAB API change. The sensor will show zero values.")
             return False
-
         return True
 
-    # No extra_state_attributes needed for simple summary sensors for now
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        # This method should only trigger an update of the sensor's state.
+        # The actual calculation happens in the state property.
+        self.async_write_ha_state()
