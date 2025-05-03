@@ -554,65 +554,95 @@ class FinanceAssistantDataUpdateCoordinator(DataUpdateCoordinator):
             raise ConfigEntryNotReady(f"Unexpected error verifying connection: {err}") from err
 
     async def _async_update_data(self):
-        """Fetch data from the Finance Assistant addon API."""
+        """Fetch data from the addon API."""
         _LOGGER.debug("Coordinator: Starting data update...")
-        combined_data = {} # Initialize empty dict for combined results
         try:
-            # Fetch main data and config data concurrently
-            main_data_task = self._request("GET", "/all_data")
-            config_data_task = self._request("GET", "/config")
+            # Fetch main data and config data in parallel
+            # Ensure `make_api_request` can handle potential errors gracefully
+            all_data_task = self.make_api_request("get", "all_data")
+            config_data_task = self.make_api_request("get", "config")
 
-            main_data, config_data = await asyncio.gather(
-                main_data_task,
-                config_data_task,
-                return_exceptions=True # Allow individual tasks to fail without stopping others
-            )
+            # Gather results
+            results = await asyncio.gather(all_data_task, config_data_task, return_exceptions=True)
 
-            # --- Handle Main Data --- #
-            if isinstance(main_data, Exception):
-                 _LOGGER.error(f"Coordinator: Error fetching main data from /all_data: {main_data}")
-                 # Depending on severity, maybe raise UpdateFailed or return previous?
-                 # For now, return previous data if main data fails critically.
-                 raise UpdateFailed(f"Failed to fetch main data: {main_data}") from main_data
-            elif not isinstance(main_data, dict):
-                 _LOGGER.error(f"Coordinator: Received non-dict main data from /all_data. Type: {type(main_data)}")
-                 raise UpdateFailed("Received invalid main data format.")
+            # --- Process all_data --- PREVIOUSLY MODIFIED ---
+            all_data_response = results[0]
+            if isinstance(all_data_response, Exception):
+                _LOGGER.error(f"Error fetching main data: {all_data_response}", exc_info=all_data_response)
+                # Decide how to handle partial failure - raise UpdateFailed or return partial/old data?
+                # Raising UpdateFailed seems appropriate here.
+                raise UpdateFailed(f"Error fetching main data: {all_data_response}")
+            elif not isinstance(all_data_response, dict):
+                # If the response isn't an exception but also not a dict, it's unexpected.
+                _LOGGER.error(f"Unexpected response type for main data: {type(all_data_response)}. Response: {str(all_data_response)[:200]}")
+                raise UpdateFailed(f"Unexpected response type for main data: {type(all_data_response)}")
             else:
-                 _LOGGER.debug(f"Coordinator: Received main data keys: {list(main_data.keys())}")
-                 combined_data.update(main_data) # Add main data to combined dict
+                # Successfully got main data as a dictionary
+                all_data = all_data_response
+                _LOGGER.debug(f"Coordinator: Received main data keys: {list(all_data.keys())}")
+            # --- End all_data processing ---
 
-            # --- Handle Config Data --- #
-            if isinstance(config_data, Exception):
-                 _LOGGER.warning(f"Coordinator: Error fetching config data from /config: {config_data}. Using default/last known config.")
-                 # Use last known config if available, otherwise default to empty dict
-                 combined_data['config'] = self.data.get('config', {}) if self.data else {}
-            elif not isinstance(config_data, dict):
-                 _LOGGER.warning(f"Coordinator: Received non-dict config data from /config. Type: {type(config_data)}. Using default/last known config.")
-                 combined_data['config'] = self.data.get('config', {}) if self.data else {}
+            # --- Process config_data --- PREVIOUSLY MODIFIED ---
+            config_data_response = results[1]
+            config_changed = False # Flag to track config change
+            new_config_data = None
+            if isinstance(config_data_response, Exception):
+                _LOGGER.error(f"Error fetching config data: {config_data_response}", exc_info=config_data_response)
+                # If we can't get config, maybe use old config if available?
+                if self.data and isinstance(self.data.get("config"), dict):
+                    _LOGGER.warning("Using previously fetched config data due to error.")
+                    new_config_data = self.data["config"]
+                else:
+                    _LOGGER.error("Could not fetch config data and no previous config available.")
+                    # Depending on severity, could raise UpdateFailed or proceed without config
+                    raise UpdateFailed(f"Error fetching config data: {config_data_response}")
+            elif not isinstance(config_data_response, dict):
+                 _LOGGER.error(f"Unexpected response type for config data: {type(config_data_response)}. Response: {str(config_data_response)[:200]}")
+                 raise UpdateFailed(f"Unexpected response type for config data: {type(config_data_response)}")
             else:
-                 _LOGGER.debug(f"Coordinator: Received config data: {config_data}")
-                 combined_data['config'] = config_data # Add config data under the 'config' key
+                # Successfully got config data
+                new_config_data = config_data_response
+                _LOGGER.debug(f"Coordinator: Received config data: {new_config_data}")
 
-            # --- Perform basic data validation on main data (optional) ---
-            expected_keys = ["accounts", "assets", "liabilities", "credit_cards", "transactions", "scheduled_transactions"]
-            missing_keys = [key for key in expected_keys if key not in combined_data]
-            if missing_keys:
-                 _LOGGER.warning(f"Coordinator: Combined data is missing expected main keys: {missing_keys}")
-                 # Still return partial data
-            # --- End basic data validation ---
+                # --- Check if config changed --- NEW ---
+                if self.data and isinstance(self.data.get("config"), dict) and self.data["config"] != new_config_data:
+                    _LOGGER.info(f"Coordinator: Config data changed from {self.data['config']} to {new_config_data}. Forcing update.")
+                    config_changed = True
+                elif not self.data:
+                     _LOGGER.debug("Coordinator: Initial fetch, considering config as changed.")
+                     config_changed = True # Consider changed on first fetch
+                # --- End Check if config changed --- NEW ---
 
-            # Return the combined data dictionary
+            # --- End config_data processing ---
+
+            # Combine data
+            combined_data = {
+                **all_data, # Spread the main data dictionary
+                "config": new_config_data # Add the processed config data
+            }
+
+            # --- Force update if config changed --- NEW ---
+            if config_changed:
+                # Add a timestamp to ensure the data object is different
+                combined_data["_config_updated_at"] = datetime.now().isoformat()
+                _LOGGER.debug(f"Added _config_updated_at timestamp to force update.")
+            # --- End Force update --- NEW ---
+
             _LOGGER.debug(f"Coordinator: Successfully fetched and returning combined data with keys: {list(combined_data.keys())}")
             return combined_data
 
-        except aiohttp.ClientConnectorError as conn_err:
-            _LOGGER.error(f"Coordinator: Connection error fetching data: {conn_err}")
-            raise UpdateFailed(f"Connection error: {conn_err}") from conn_err
-        except UpdateFailed: # Re-raise UpdateFailed if thrown above
-             raise
-        except Exception as e:
-            _LOGGER.error(f"Coordinator: Unexpected error during data update: {e}", exc_info=True)
-            raise UpdateFailed(f"Unexpected error: {e}") from e
+        except aiohttp.ClientConnectorError as err:
+            # Handle specific connection errors (e.g., addon not running)
+            _LOGGER.error(f"API connection error: {err}", exc_info=True)
+            raise UpdateFailed(f"Could not connect to the addon API: {err}")
+        except asyncio.TimeoutError:
+            # Handle request timeout
+            _LOGGER.error("API request timed out.")
+            raise UpdateFailed("Timeout connecting to the addon API.")
+        except Exception as err:
+            # Catch any other unexpected errors during the update process
+            _LOGGER.error(f"Unexpected error updating data: {err}", exc_info=True)
+            raise UpdateFailed(f"An unexpected error occurred: {err}")
 
     async def make_api_request(self, method, endpoint, params=None, data=None, json_data=None, headers=None):
         """Helper method to make API requests using the internal _request logic."""
